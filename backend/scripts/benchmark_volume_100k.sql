@@ -190,8 +190,9 @@ SET hnsw.iterative_scan = relaxed_order;
 SET hnsw.max_scan_tuples = 50000;
 SET work_mem = '64MB';
 SET enable_seqscan = off;
+SET enable_bitmapscan = off;
 
--- Warm-up previo para estabilizar buffers en memoria
+-- Warm-up previo para estabilizar buffers en memoria y simular régimen operacional continuo
 DO $$
 BEGIN
     PERFORM p.id
@@ -200,7 +201,10 @@ BEGIN
       AND p.operacion = 'VENTA'
       AND p.tipo_propiedad = 'DEPARTAMENTO'
       AND p.precio_uf BETWEEN 2000 AND 6000
-    LIMIT 100;
+    ORDER BY p.embedding <=> (
+        SELECT (base_vec + noise_vec) FROM vector_base_pool bp, vector_noise_pool np WHERE bp.pool_id = 0 AND np.noise_id = 0
+    )
+    LIMIT 200;
 END $$;
 
 \echo '===================================================================================================='
