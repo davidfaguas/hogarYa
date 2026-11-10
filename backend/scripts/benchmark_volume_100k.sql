@@ -52,7 +52,7 @@ FROM generate_series(0, 49) n,
 GROUP BY n;
 
 -- 1. Generación sintética de 100.000 propiedades representativas del mercado chileno
--- Datos descorrelacionados con combinaciones reales de VENTA + DEPARTAMENTO y proximidad a Metro
+-- Datos descorrelacionados con combinaciones reales de VENTA + DEPARTAMENTO y distribución de texto
 INSERT INTO propiedad (
     id,
     codigo_publicacion,
@@ -79,8 +79,15 @@ SELECT
     gen_random_uuid(),
     'SYN-' || lpad(i::text, 6, '0'),
     '00000000-0000-0000-0000-000000000001'::uuid,
-    'Propiedad ' || i || ' departamento piscina metro ' || (ARRAY['Ñuñoa', 'Providencia', 'Las Condes', 'Santiago', 'La Florida', 'Maipú'])[1 + (i % 6)],
-    'Excelente departamento luminoso con piscina y quincho, cercano a comercio, areas verdes y estacion de metro.',
+    'Propiedad ' || i || ' en ' || (ARRAY['Ñuñoa', 'Providencia', 'Las Condes', 'Santiago', 'La Florida', 'Maipú'])[1 + (i % 6)],
+    'Excelente departamento luminoso con ' ||
+    (ARRAY[
+        'piscina y quincho cerca de estacion de metro.',
+        'vista despejada a la cordillera y terraza amplia.',
+        'areas verdes y seguridad 24 horas.',
+        'estacionamiento techado y bodega grande.',
+        'cocina equipada y logia independiente.'
+    ])[1 + (i % 5)],
     (ARRAY['DEPARTAMENTO', 'CASA', 'OFICINA', 'PARCELA'])[1 + (i % 4)],
     CASE WHEN ((i / 4) % 2 = 0) THEN 'VENTA' ELSE 'ARRIENDO' END,
     'USADA',
@@ -184,51 +191,90 @@ SET hnsw.max_scan_tuples = 50000;
 SET work_mem = '64MB';
 SET enable_seqscan = off;
 
+-- Warm-up previo para estabilizar buffers en memoria
+DO $$
+BEGIN
+    PERFORM p.id
+    FROM propiedad p
+    WHERE p.activo = true
+      AND p.operacion = 'VENTA'
+      AND p.tipo_propiedad = 'DEPARTAMENTO'
+      AND p.precio_uf BETWEEN 2000 AND 6000
+    LIMIT 100;
+END $$;
+
 \echo '===================================================================================================='
-\echo 'EXPLAIN (ANALYZE, BUFFERS): PLAN DE EJECUCIÓN CONSULTA HÍBRIDA REAL'
+\echo 'EXPLAIN (ANALYZE, BUFFERS): PLAN DE EJECUCIÓN CONSULTA HÍBRIDA REAL DEL MAPPER'
 \echo '===================================================================================================='
 EXPLAIN (ANALYZE, BUFFERS)
-WITH top_vector AS (
-    SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> :'q_vec'::vector(768)) as rank_vec
-    FROM propiedad
-    WHERE activo = true
-      AND operacion = 'VENTA'
-      AND tipo_propiedad = 'DEPARTAMENTO'
-      AND precio_uf BETWEEN 2000 AND 6000
-    ORDER BY embedding <=> :'q_vec'::vector(768)
+WITH uf_actual AS (
+    SELECT valor AS uf_hoy 
+    FROM valor_uf 
+    WHERE fecha <= CURRENT_DATE 
+    ORDER BY fecha DESC 
+    LIMIT 1
+),
+top_vec AS (
+    SELECT p.id, ROW_NUMBER() OVER (ORDER BY p.embedding <=> :'q_vec'::vector(768)) as r_vec
+    FROM propiedad p
+    WHERE p.activo = true
+      AND p.operacion = 'VENTA'
+      AND p.tipo_propiedad = 'DEPARTAMENTO'
+      AND p.precio_uf BETWEEN 2000 AND 6000
+    ORDER BY p.embedding <=> :'q_vec'::vector(768)
     LIMIT 200
 ),
-top_text AS (
-    SELECT id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(search_vector, websearch_to_tsquery('spanish', 'piscina metro')) DESC) as rank_text
-    FROM propiedad
-    WHERE activo = true
-      AND operacion = 'VENTA'
-      AND tipo_propiedad = 'DEPARTAMENTO'
-      AND precio_uf BETWEEN 2000 AND 6000
+top_fts AS (
+    SELECT p.id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(p.search_vector, websearch_to_tsquery('spanish', 'piscina metro')) DESC) as r_fts
+    FROM propiedad p
+    WHERE p.activo = true
+      AND p.operacion = 'VENTA'
+      AND p.tipo_propiedad = 'DEPARTAMENTO'
+      AND p.precio_uf BETWEEN 2000 AND 6000
       AND (
-          search_vector @@ websearch_to_tsquery('spanish', 'piscina metro')
-          OR titulo % 'piscina metro'
+          p.search_vector @@ websearch_to_tsquery('spanish', 'piscina metro')
+          OR p.titulo % 'piscina metro'
       )
-    ORDER BY ts_rank_cd(search_vector, websearch_to_tsquery('spanish', 'piscina metro')) DESC
+    ORDER BY ts_rank_cd(p.search_vector, websearch_to_tsquery('spanish', 'piscina metro')) DESC
     LIMIT 200
 ),
-rrf_fusion AS (
+rrf_unificado AS (
     SELECT
-        COALESCE(v.id, t.id) AS id,
-        (COALESCE(1.0 / (60.0 + v.rank_vec), 0.0) + COALESCE(1.0 / (60.0 + t.rank_text), 0.0)) AS rrf_score
-    FROM top_vector v
-    FULL OUTER JOIN top_text t ON v.id = t.id
+        COALESCE(f.id, v.id) AS id,
+        (COALESCE(1.0 / (60.0 + f.r_fts), 0.0) + COALESCE(1.0 / (60.0 + v.r_vec), 0.0)) AS rrf_score
+    FROM top_fts f
+    FULL OUTER JOIN top_vec v ON f.id = v.id
+),
+metro_detalle AS (
+    SELECT DISTINCT ON (p.id)
+        p.id AS propiedad_id,
+        em.nombre AS nombre_estacion,
+        ROUND(ST_Distance(p.ubicacion, em.ubicacion)::numeric, 1)::float8 AS distancia_metros
+    FROM rrf_unificado u
+    JOIN propiedad p ON p.id = u.id
+    JOIN estacion_metro em ON ST_DWithin(p.ubicacion, em.ubicacion, 1000)
+    WHERE em.activo = TRUE
+    ORDER BY p.id, ST_Distance(p.ubicacion, em.ubicacion) ASC
 )
-SELECT p.id, p.codigo_publicacion, p.titulo, p.precio_uf, rrf.rrf_score
-FROM rrf_fusion rrf
-JOIN propiedad p ON p.id = rrf.id
-WHERE EXISTS (
-    SELECT 1 FROM estacion_metro em
-    WHERE em.activo = true
-      AND ST_DWithin(p.ubicacion, em.ubicacion, 1000)
-)
-ORDER BY rrf.rrf_score DESC
-LIMIT 20;
+SELECT 
+    p.id,
+    p.codigo_publicacion,
+    p.titulo,
+    p.operacion,
+    p.tipo_propiedad,
+    p.precio_uf,
+    ROUND(p.precio_uf * COALESCE(uf.uf_hoy, 37850), 0) AS precio_clp_estimado,
+    c.nombre AS comuna_nombre,
+    md.distancia_metros AS distancia_metro_metros,
+    md.nombre_estacion AS nombre_estacion_cercana,
+    u.rrf_score
+FROM rrf_unificado u
+JOIN propiedad p ON p.id = u.id
+JOIN comuna c ON c.id = p.comuna_id
+LEFT JOIN uf_actual uf ON TRUE
+LEFT JOIN metro_detalle md ON md.propiedad_id = p.id
+ORDER BY u.rrf_score DESC, p.precio_uf ASC
+LIMIT 20 OFFSET 0;
 
 -- ====================================================================================================
 -- 5. EVALUACIÓN DE RECALL@10: FIDELIDAD DEL ÍNDICE SOBRE DISTANCIAS CON VECTORES ÚNICOS
