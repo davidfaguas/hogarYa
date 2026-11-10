@@ -9,30 +9,30 @@
     <!-- ========================================================================= -->
     <resultMap id="SearchResultMap" type="cl.hogarya.domain.model.search.PropertySearchResultDto">
         <constructor>
-            <idArg column="id" javaType="java.util.UUID"/>
-            <arg column="codigo_publicacion" javaType="java.lang.String"/>
-            <arg column="titulo" javaType="java.lang.String"/>
-            <arg column="operacion" javaType="java.lang.String"/>
-            <arg column="tipo_propiedad" javaType="java.lang.String"/>
-            <arg column="estado" javaType="java.lang.String"/>
-            <arg column="precio_uf" javaType="java.math.BigDecimal"/>
-            <arg column="precio_clp_estimado" javaType="java.math.BigDecimal"/>
-            <arg column="m2_util" javaType="java.math.BigDecimal"/>
-            <arg column="m2_total" javaType="java.math.BigDecimal"/>
-            <arg column="dormitorios" javaType="short"/>
-            <arg column="banos" javaType="short"/>
-            <arg column="estacionamientos" javaType="short"/>
-            <arg column="comuna_nombre" javaType="java.lang.String"/>
-            <arg column="barrio" javaType="java.lang.String"/>
-            <arg column="latitud" javaType="double"/>
-            <arg column="longitud" javaType="double"/>
-            <arg column="distancia_metro_metros" javaType="java.lang.Double"/>
-            <arg column="nombre_estacion_cercana" javaType="java.lang.String"/>
-            <arg column="tiene_tour_virtual" javaType="boolean"/>
-            <arg column="tiene_video" javaType="boolean"/>
-            <arg column="verificada" javaType="boolean"/>
-            <arg column="imagen_portada_url" javaType="java.lang.String"/>
-            <arg column="rrf_score" javaType="double"/>
+            <idArg column="id" javaType="java.util.UUID" name="id" typeHandler="cl.hogarya.infrastructure.persistence.handler.UuidTypeHandler"/>
+            <arg column="codigo_publicacion" javaType="java.lang.String" name="codigoPublicacion"/>
+            <arg column="titulo" javaType="java.lang.String" name="titulo"/>
+            <arg column="operacion" javaType="java.lang.String" name="operacion"/>
+            <arg column="tipo_propiedad" javaType="java.lang.String" name="tipoPropiedad"/>
+            <arg column="estado" javaType="java.lang.String" name="estado"/>
+            <arg column="precio_uf" javaType="java.math.BigDecimal" name="precioUf"/>
+            <arg column="precio_clp_estimado" javaType="java.math.BigDecimal" name="precioClpEstimado"/>
+            <arg column="m2_util" javaType="java.math.BigDecimal" name="m2Util"/>
+            <arg column="m2_total" javaType="java.math.BigDecimal" name="m2Total"/>
+            <arg column="dormitorios" javaType="_short" name="dormitorios"/>
+            <arg column="banos" javaType="_short" name="banos"/>
+            <arg column="estacionamientos" javaType="_short" name="estacionamientos"/>
+            <arg column="comuna_nombre" javaType="java.lang.String" name="comunaNombre"/>
+            <arg column="barrio" javaType="java.lang.String" name="barrio"/>
+            <arg column="latitud" javaType="_double" name="latitud"/>
+            <arg column="longitud" javaType="_double" name="longitud"/>
+            <arg column="distancia_metro_metros" javaType="java.lang.Double" name="distanciaMetroMetros"/>
+            <arg column="nombre_estacion_cercana" javaType="java.lang.String" name="nombreEstacionCercana"/>
+            <arg column="tiene_tour_virtual" javaType="_boolean" name="tieneTourVirtual"/>
+            <arg column="tiene_video" javaType="_boolean" name="tieneVideo"/>
+            <arg column="verificada" javaType="_boolean" name="verificada"/>
+            <arg column="imagen_portada_url" javaType="java.lang.String" name="imagenPortadaUrl"/>
+            <arg column="rrf_score" javaType="_double" name="rrfScore"/>
         </constructor>
     </resultMap>
 
