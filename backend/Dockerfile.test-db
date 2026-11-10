@@ -1,28 +1,34 @@
 # ==============================================================================
 # Dockerfile para Base de Datos de Prueba: PostgreSQL 16 + PostGIS 3.4 + pgvector 0.8.0
-# Compila e instala pgvector v0.8.0 sobre la imagen oficial postgis/postgis:16-3.4
+# Basado en postgres:16-bookworm oficial con PostGIS 3 y pgvector v0.8.0
 # ==============================================================================
-FROM postgis/postgis:16-3.4
+FROM postgres:16-bookworm
 
 LABEL maintainer="HogarYa Platform Architecture <arquitectura@hogarya.cl>"
-LABEL description="PostgreSQL 16 oficial con extensiones PostGIS 3.4 y pgvector 0.8.0 compiladas"
+LABEL description="PostgreSQL 16 oficial con extensiones PostGIS 3 y pgvector 0.8.0"
+
+ENV DEBIAN_FRONTEND=noninteractive
 
 USER root
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
     build-essential \
-    postgresql-server-dev-16 \
     git \
     ca-certificates \
-    && cd /tmp \
-    && git clone --branch v0.8.0 https://github.com/pgvector/pgvector.git \
-    && cd pgvector \
-    && make \
-    && make install \
-    && rm -rf /tmp/pgvector \
-    && apt-get purge -y build-essential postgresql-server-dev-16 git \
-    && apt-get autoremove -y \
-    && rm -rf /var/lib/apt/lists/*
+    postgresql-server-dev-16 \
+    postgresql-16-postgis-3 \
+    postgresql-16-postgis-3-scripts && \
+    git clone --branch v0.8.0 https://github.com/pgvector/pgvector.git /tmp/pgvector && \
+    cd /tmp/pgvector && \
+    make clean && \
+    make && \
+    make install && \
+    rm -rf /tmp/pgvector && \
+    apt-get purge -y build-essential git postgresql-server-dev-16 && \
+    apt-get autoremove -y && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
 # Verificar la presencia de los archivos de control de ambas extensiones
 RUN ls -l /usr/share/postgresql/16/extension/postgis.control && \
