@@ -122,7 +122,10 @@ FROM vector_base_pool bp, vector_noise_pool np
 WHERE bp.pool_id = 0 AND np.noise_id = 0 \gset
 
 -- ====================================================================================================
--- 3. DIAGNÓSTICO: RECUENTO TOP-200 VECTORIAL CON FILTROS DUROS (CON Y SIN ITERATIVE SCAN)
+-- ====================================================================================================
+-- 3. DIAGNÓSTICO: RECUENTO TOP-200 VECTORIAL CON FILTROS SELECTIVOS (CON Y SIN ITERATIVE SCAN)
+--    Filtro altamente selectivo (~54 filas de 100.000, 0.054% del universo total):
+--    comuna_id = 1 (Santiago), operacion = 'VENTA', tipo = 'DEPARTAMENTO', dormitorios = 1, precio 3000..3070 UF
 -- ====================================================================================================
 CREATE TEMP TABLE diagnostico_iterative_scan (
     configuracion text,
@@ -132,13 +135,13 @@ CREATE TEMP TABLE diagnostico_iterative_scan (
     filas_devueltas int
 );
 
--- Caso A: Sin iterative_scan (iterative_scan = off)
+-- Caso A: Sin iterative_scan (iterative_scan = off, standard HNSW)
 SET hnsw.ef_search = 200;
 SET hnsw.iterative_scan = off;
 
 INSERT INTO diagnostico_iterative_scan
 SELECT
-    'Sin iterative_scan (standard HNSW)',
+    'Sin iterative_scan (standard HNSW con filtros selectivos)',
     200,
     'off',
     'default',
@@ -149,7 +152,9 @@ FROM (
     WHERE activo = true
       AND operacion = 'VENTA'
       AND tipo_propiedad = 'DEPARTAMENTO'
-      AND precio_uf BETWEEN 2000 AND 6000
+      AND comuna_id = 1
+      AND dormitorios = 1
+      AND precio_uf BETWEEN 3000 AND 3070
     ORDER BY embedding <=> :'q_vec'::vector(768)
     LIMIT 200
 ) sub;
@@ -161,7 +166,7 @@ SET hnsw.max_scan_tuples = 50000;
 
 INSERT INTO diagnostico_iterative_scan
 SELECT
-    'Con iterative_scan = relaxed_order (ajustado)',
+    'Con iterative_scan = relaxed_order (ajustado para filtros selectivos)',
     200,
     'relaxed_order',
     '50000',
@@ -172,25 +177,28 @@ FROM (
     WHERE activo = true
       AND operacion = 'VENTA'
       AND tipo_propiedad = 'DEPARTAMENTO'
-      AND precio_uf BETWEEN 2000 AND 6000
+      AND comuna_id = 1
+      AND dormitorios = 1
+      AND precio_uf BETWEEN 3000 AND 3070
     ORDER BY embedding <=> :'q_vec'::vector(768)
     LIMIT 200
 ) sub;
 
 \echo '===================================================================================================='
-\echo 'DIAGNÓSTICO HNSW: FILAS DEVUELTAS EN TOP-200 CON FILTROS DUROS'
+\echo 'DIAGNÓSTICO HNSW: FILAS DEVUELTAS EN TOP-200 CON FILTROS ALTAMENTE SELECTIVOS (~50 FILAS EN TOTAL)'
 \echo '===================================================================================================='
 SELECT configuracion, ef_search, iterative_scan, max_scan_tuples, filas_devueltas FROM diagnostico_iterative_scan;
 
 -- ====================================================================================================
 -- 4. EXPLAIN (ANALYZE, BUFFERS): CONSULTA HÍBRIDA COMPLETA DEL MAPPER (FILTROS + FTS + VECTOR + RRF)
+--    MEDICIÓN SIN enable_bitmapscan = off (PERMITIENDO BITMAP SCAN AL OPTIMIZADOR)
+--    3 REPETICIONES COMPLETAS CON PLANES ÍNTEGROS Y ESTADÍSTICAS (MEDIANA Y P95)
 -- ====================================================================================================
 SET hnsw.ef_search = 200;
 SET hnsw.iterative_scan = relaxed_order;
 SET hnsw.max_scan_tuples = 50000;
 SET work_mem = '64MB';
-SET enable_seqscan = off;
-SET enable_bitmapscan = off;
+-- NOTA CRÍTICA: NO se desactiva enable_bitmapscan; se mantiene la configuración natural del motor.
 
 -- Warm-up previo para estabilizar buffers en memoria y simular régimen operacional continuo
 DO $$
@@ -200,7 +208,9 @@ BEGIN
     WHERE p.activo = true
       AND p.operacion = 'VENTA'
       AND p.tipo_propiedad = 'DEPARTAMENTO'
-      AND p.precio_uf BETWEEN 2000 AND 6000
+      AND p.comuna_id = 1
+      AND p.dormitorios = 1
+      AND p.precio_uf BETWEEN 3000 AND 3070
     ORDER BY p.embedding <=> (
         SELECT (base_vec + noise_vec) FROM vector_base_pool bp, vector_noise_pool np WHERE bp.pool_id = 0 AND np.noise_id = 0
     )
@@ -208,7 +218,7 @@ BEGIN
 END $$;
 
 \echo '===================================================================================================='
-\echo 'EXPLAIN (ANALYZE, BUFFERS): PLAN DE EJECUCIÓN CONSULTA HÍBRIDA REAL DEL MAPPER'
+\echo 'EXPLAIN (ANALYZE, BUFFERS) - REPETICIÓN 1 DE 3'
 \echo '===================================================================================================='
 EXPLAIN (ANALYZE, BUFFERS)
 WITH uf_actual AS (
@@ -224,7 +234,9 @@ top_vec AS (
     WHERE p.activo = true
       AND p.operacion = 'VENTA'
       AND p.tipo_propiedad = 'DEPARTAMENTO'
-      AND p.precio_uf BETWEEN 2000 AND 6000
+      AND p.comuna_id = 1
+      AND p.dormitorios = 1
+      AND p.precio_uf BETWEEN 3000 AND 3070
     ORDER BY p.embedding <=> :'q_vec'::vector(768)
     LIMIT 200
 ),
@@ -234,7 +246,9 @@ top_fts AS (
     WHERE p.activo = true
       AND p.operacion = 'VENTA'
       AND p.tipo_propiedad = 'DEPARTAMENTO'
-      AND p.precio_uf BETWEEN 2000 AND 6000
+      AND p.comuna_id = 1
+      AND p.dormitorios = 1
+      AND p.precio_uf BETWEEN 3000 AND 3070
       AND p.search_vector @@ websearch_to_tsquery('spanish', 'piscina metro')
     ORDER BY ts_rank_cd(p.search_vector, websearch_to_tsquery('spanish', 'piscina metro')) DESC
     LIMIT 200
@@ -281,6 +295,270 @@ LEFT JOIN uf_actual uf ON TRUE
 LEFT JOIN metro_detalle md ON md.propiedad_id = p.id
 ORDER BY u.rrf_score DESC, p.precio_uf ASC
 LIMIT 20 OFFSET 0;
+
+\echo '===================================================================================================='
+\echo 'EXPLAIN (ANALYZE, BUFFERS) - REPETICIÓN 2 DE 3'
+\echo '===================================================================================================='
+EXPLAIN (ANALYZE, BUFFERS)
+WITH uf_actual AS (
+    SELECT valor AS uf_hoy 
+    FROM valor_uf 
+    WHERE fecha <= CURRENT_DATE 
+    ORDER BY fecha DESC 
+    LIMIT 1
+),
+top_vec AS (
+    SELECT p.id, ROW_NUMBER() OVER (ORDER BY p.embedding <=> :'q_vec'::vector(768)) as r_vec
+    FROM propiedad p
+    WHERE p.activo = true
+      AND p.operacion = 'VENTA'
+      AND p.tipo_propiedad = 'DEPARTAMENTO'
+      AND p.comuna_id = 1
+      AND p.dormitorios = 1
+      AND p.precio_uf BETWEEN 3000 AND 3070
+    ORDER BY p.embedding <=> :'q_vec'::vector(768)
+    LIMIT 200
+),
+top_fts AS (
+    SELECT p.id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(p.search_vector, websearch_to_tsquery('spanish', 'piscina metro')) DESC) as r_fts
+    FROM propiedad p
+    WHERE p.activo = true
+      AND p.operacion = 'VENTA'
+      AND p.tipo_propiedad = 'DEPARTAMENTO'
+      AND p.comuna_id = 1
+      AND p.dormitorios = 1
+      AND p.precio_uf BETWEEN 3000 AND 3070
+      AND p.search_vector @@ websearch_to_tsquery('spanish', 'piscina metro')
+    ORDER BY ts_rank_cd(p.search_vector, websearch_to_tsquery('spanish', 'piscina metro')) DESC
+    LIMIT 200
+),
+rrf_unificado AS (
+    SELECT
+        COALESCE(f.id, v.id) AS id,
+        (COALESCE(1.0 / (60.0 + f.r_fts), 0.0) + COALESCE(1.0 / (60.0 + v.r_vec), 0.0)) AS rrf_score
+    FROM top_fts f
+    FULL OUTER JOIN top_vec v ON f.id = v.id
+),
+metro_detalle AS (
+    SELECT DISTINCT ON (p.id)
+        p.id AS propiedad_id,
+        em.nombre AS nombre_estacion,
+        ROUND(ST_Distance(p.ubicacion, em.ubicacion)::numeric, 1)::float8 AS distancia_metros
+    FROM (
+        SELECT id 
+        FROM rrf_unificado 
+        ORDER BY rrf_score DESC 
+        LIMIT 20 OFFSET 0
+    ) u
+    JOIN propiedad p ON p.id = u.id
+    JOIN estacion_metro em ON ST_DWithin(p.ubicacion, em.ubicacion, 1000)
+    WHERE em.activo = TRUE
+    ORDER BY p.id, ST_Distance(p.ubicacion, em.ubicacion) ASC
+)
+SELECT 
+    p.id,
+    p.codigo_publicacion,
+    p.titulo,
+    p.operacion,
+    p.tipo_propiedad,
+    p.precio_uf,
+    ROUND(p.precio_uf * COALESCE(uf.uf_hoy, 37850), 0) AS precio_clp_estimado,
+    c.nombre AS comuna_nombre,
+    md.distancia_metros AS distancia_metro_metros,
+    md.nombre_estacion AS nombre_estacion_cercana,
+    u.rrf_score
+FROM rrf_unificado u
+JOIN propiedad p ON p.id = u.id
+JOIN comuna c ON c.id = p.comuna_id
+LEFT JOIN uf_actual uf ON TRUE
+LEFT JOIN metro_detalle md ON md.propiedad_id = p.id
+ORDER BY u.rrf_score DESC, p.precio_uf ASC
+LIMIT 20 OFFSET 0;
+
+\echo '===================================================================================================='
+\echo 'EXPLAIN (ANALYZE, BUFFERS) - REPETICIÓN 3 DE 3'
+\echo '===================================================================================================='
+EXPLAIN (ANALYZE, BUFFERS)
+WITH uf_actual AS (
+    SELECT valor AS uf_hoy 
+    FROM valor_uf 
+    WHERE fecha <= CURRENT_DATE 
+    ORDER BY fecha DESC 
+    LIMIT 1
+),
+top_vec AS (
+    SELECT p.id, ROW_NUMBER() OVER (ORDER BY p.embedding <=> :'q_vec'::vector(768)) as r_vec
+    FROM propiedad p
+    WHERE p.activo = true
+      AND p.operacion = 'VENTA'
+      AND p.tipo_propiedad = 'DEPARTAMENTO'
+      AND p.comuna_id = 1
+      AND p.dormitorios = 1
+      AND p.precio_uf BETWEEN 3000 AND 3070
+    ORDER BY p.embedding <=> :'q_vec'::vector(768)
+    LIMIT 200
+),
+top_fts AS (
+    SELECT p.id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(p.search_vector, websearch_to_tsquery('spanish', 'piscina metro')) DESC) as r_fts
+    FROM propiedad p
+    WHERE p.activo = true
+      AND p.operacion = 'VENTA'
+      AND p.tipo_propiedad = 'DEPARTAMENTO'
+      AND p.comuna_id = 1
+      AND p.dormitorios = 1
+      AND p.precio_uf BETWEEN 3000 AND 3070
+      AND p.search_vector @@ websearch_to_tsquery('spanish', 'piscina metro')
+    ORDER BY ts_rank_cd(p.search_vector, websearch_to_tsquery('spanish', 'piscina metro')) DESC
+    LIMIT 200
+),
+rrf_unificado AS (
+    SELECT
+        COALESCE(f.id, v.id) AS id,
+        (COALESCE(1.0 / (60.0 + f.r_fts), 0.0) + COALESCE(1.0 / (60.0 + v.r_vec), 0.0)) AS rrf_score
+    FROM top_fts f
+    FULL OUTER JOIN top_vec v ON f.id = v.id
+),
+metro_detalle AS (
+    SELECT DISTINCT ON (p.id)
+        p.id AS propiedad_id,
+        em.nombre AS nombre_estacion,
+        ROUND(ST_Distance(p.ubicacion, em.ubicacion)::numeric, 1)::float8 AS distancia_metros
+    FROM (
+        SELECT id 
+        FROM rrf_unificado 
+        ORDER BY rrf_score DESC 
+        LIMIT 20 OFFSET 0
+    ) u
+    JOIN propiedad p ON p.id = u.id
+    JOIN estacion_metro em ON ST_DWithin(p.ubicacion, em.ubicacion, 1000)
+    WHERE em.activo = TRUE
+    ORDER BY p.id, ST_Distance(p.ubicacion, em.ubicacion) ASC
+)
+SELECT 
+    p.id,
+    p.codigo_publicacion,
+    p.titulo,
+    p.operacion,
+    p.tipo_propiedad,
+    p.precio_uf,
+    ROUND(p.precio_uf * COALESCE(uf.uf_hoy, 37850), 0) AS precio_clp_estimado,
+    c.nombre AS comuna_nombre,
+    md.distancia_metros AS distancia_metro_metros,
+    md.nombre_estacion AS nombre_estacion_cercana,
+    u.rrf_score
+FROM rrf_unificado u
+JOIN propiedad p ON p.id = u.id
+JOIN comuna c ON c.id = p.comuna_id
+LEFT JOIN uf_actual uf ON TRUE
+LEFT JOIN metro_detalle md ON md.propiedad_id = p.id
+ORDER BY u.rrf_score DESC, p.precio_uf ASC
+LIMIT 20 OFFSET 0;
+
+-- Cálculo automatizado de tiempos de ejecución para mediana y p95
+CREATE TEMP TABLE latencias_ejecucion (
+    iteracion int,
+    duracion_ms numeric
+);
+
+DO $$
+DECLARE
+    t_inicio timestamptz;
+    t_fin timestamptz;
+    i int;
+    v_ms numeric;
+BEGIN
+    FOR i IN 1..3 LOOP
+        t_inicio := clock_timestamp();
+        PERFORM 1 FROM (
+            WITH uf_actual AS (
+                SELECT valor AS uf_hoy 
+                FROM valor_uf 
+                WHERE fecha <= CURRENT_DATE 
+                ORDER BY fecha DESC 
+                LIMIT 1
+            ),
+            top_vec AS (
+                SELECT p.id, ROW_NUMBER() OVER (ORDER BY p.embedding <=> (
+                    SELECT (base_vec + noise_vec) FROM vector_base_pool bp, vector_noise_pool np WHERE bp.pool_id = 0 AND np.noise_id = 0
+                )) as r_vec
+                FROM propiedad p
+                WHERE p.activo = true
+                  AND p.operacion = 'VENTA'
+                  AND p.tipo_propiedad = 'DEPARTAMENTO'
+                  AND p.comuna_id = 1
+                  AND p.dormitorios = 1
+                  AND p.precio_uf BETWEEN 3000 AND 3070
+                ORDER BY p.embedding <=> (
+                    SELECT (base_vec + noise_vec) FROM vector_base_pool bp, vector_noise_pool np WHERE bp.pool_id = 0 AND np.noise_id = 0
+                )
+                LIMIT 200
+            ),
+            top_fts AS (
+                SELECT p.id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(p.search_vector, websearch_to_tsquery('spanish', 'piscina metro')) DESC) as r_fts
+                FROM propiedad p
+                WHERE p.activo = true
+                  AND p.operacion = 'VENTA'
+                  AND p.tipo_propiedad = 'DEPARTAMENTO'
+                  AND p.comuna_id = 1
+                  AND p.dormitorios = 1
+                  AND p.precio_uf BETWEEN 3000 AND 3070
+                  AND p.search_vector @@ websearch_to_tsquery('spanish', 'piscina metro')
+                ORDER BY ts_rank_cd(p.search_vector, websearch_to_tsquery('spanish', 'piscina metro')) DESC
+                LIMIT 200
+            ),
+            rrf_unificado AS (
+                SELECT
+                    COALESCE(f.id, v.id) AS id,
+                    (COALESCE(1.0 / (60.0 + f.r_fts), 0.0) + COALESCE(1.0 / (60.0 + v.r_vec), 0.0)) AS rrf_score
+                FROM top_fts f
+                FULL OUTER JOIN top_vec v ON f.id = v.id
+            ),
+            metro_detalle AS (
+                SELECT DISTINCT ON (p.id)
+                    p.id AS propiedad_id,
+                    em.nombre AS nombre_estacion,
+                    ROUND(ST_Distance(p.ubicacion, em.ubicacion)::numeric, 1)::float8 AS distancia_metros
+                FROM (
+                    SELECT id 
+                    FROM rrf_unificado 
+                    ORDER BY rrf_score DESC 
+                    LIMIT 20 OFFSET 0
+                ) u
+                JOIN propiedad p ON p.id = u.id
+                JOIN estacion_metro em ON ST_DWithin(p.ubicacion, em.ubicacion, 1000)
+                WHERE em.activo = TRUE
+                ORDER BY p.id, ST_Distance(p.ubicacion, em.ubicacion) ASC
+            )
+            SELECT 
+                p.id,
+                p.codigo_publicacion,
+                p.precio_uf,
+                c.nombre AS comuna_nombre,
+                md.distancia_metros,
+                u.rrf_score
+            FROM rrf_unificado u
+            JOIN propiedad p ON p.id = u.id
+            JOIN comuna c ON c.id = p.comuna_id
+            LEFT JOIN uf_actual uf ON TRUE
+            LEFT JOIN metro_detalle md ON md.propiedad_id = p.id
+            ORDER BY u.rrf_score DESC, p.precio_uf ASC
+            LIMIT 20 OFFSET 0
+        ) consulta;
+        t_fin := clock_timestamp();
+        v_ms := round((extract(epoch from (t_fin - t_inicio)) * 1000.0)::numeric, 2);
+        INSERT INTO latencias_ejecucion (iteracion, duracion_ms) VALUES (i, v_ms);
+    END LOOP;
+END $$;
+
+\echo '===================================================================================================='
+\echo 'ESTADÍSTICAS DE LATENCIA REAL DE LA CONSULTA HÍBRIDA (3 REPETICIONES)'
+\echo '===================================================================================================='
+SELECT 
+    percentile_cont(0.50) WITHIN GROUP (ORDER BY duracion_ms) AS mediana_latencia_ms,
+    percentile_cont(0.95) WITHIN GROUP (ORDER BY duracion_ms) AS p95_latencia_ms,
+    min(duracion_ms) AS min_latencia_ms,
+    max(duracion_ms) AS max_latencia_ms
+FROM latencias_ejecucion;
 
 -- ====================================================================================================
 -- 5. EVALUACIÓN DE RECALL@10: FIDELIDAD DEL ÍNDICE SOBRE DISTANCIAS CON VECTORES ÚNICOS

@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
@@ -246,5 +247,73 @@ class AuthControllerTest {
         String setCookieHeader = response.getHeaders().getFirst(HttpHeaders.SET_COOKIE);
         assertNotNull(setCookieHeader);
         assertTrue(setCookieHeader.contains("Max-Age=0") || setCookieHeader.contains("max-age=0"));
+    }
+
+    @Test
+    @DisplayName("Seguridad IP: No confía en X-Forwarded-For si el remoteAddr no es un proxy de confianza")
+    void shouldNotTrustXForwardedForFromUntrustedRemoteAddr() {
+        AuthController.UserLookup emptyLookup = identifier -> Optional.empty();
+        AuthController authController = AuthController.forTesting(tokenService, passwordEncoder, emptyLookup, true, "Strict");
+
+        MockHttpServletRequest request = new MockHttpServletRequest();
+        request.setRemoteAddr("198.51.100.25"); // IP pública/no de confianza
+        request.addHeader("X-Forwarded-For", "203.0.113.195"); // Intento de spoofing
+
+        String resolvedIp = authController.resolveClientIp(request);
+        assertEquals("198.51.100.25", resolvedIp, "Debe ignorar X-Forwarded-For cuando remoteAddr no está en proxies de confianza");
+
+        // 5 intentos fallidos con esa IP no confiable bloquean esa IP
+        String targetUser = "victima-spoof@hogarya.cl";
+        for (int i = 0; i < 5; i++) {
+            ResponseEntity<AuthController.AuthResponse> r = authController.login(
+                    new AuthController.LoginRequest(targetUser, "claveInvalida" + i, null),
+                    request
+            );
+            assertEquals(HttpStatus.UNAUTHORIZED.value(), r.getStatusCode().value());
+        }
+
+        // Intento 6 debe dar 429
+        ResponseEntity<AuthController.AuthResponse> blocked = authController.login(
+                new AuthController.LoginRequest(targetUser, "claveInvalida6", null),
+                request
+        );
+        assertEquals(HttpStatus.TOO_MANY_REQUESTS.value(), blocked.getStatusCode().value());
+    }
+
+    @Test
+    @DisplayName("Seguridad Global: Rotar X-Forwarded-For a través de proxy confiable bloquea tras 20 intentos por tope global")
+    void shouldBlockWhenExceedingGlobalCapEvenWithRotatingXForwardedForFromTrustedProxy() {
+        AuthController.UserLookup emptyLookup = identifier -> Optional.empty();
+        AuthController authController = AuthController.forTesting(tokenService, passwordEncoder, emptyLookup, true, "Strict");
+
+        String targetUser = "victima-global@hogarya.cl";
+
+        // Simular 20 intentos con IPs de cliente rotadas a través del proxy de confianza 10.0.0.1
+        for (int i = 1; i <= 20; i++) {
+            MockHttpServletRequest req = new MockHttpServletRequest();
+            req.setRemoteAddr("10.0.0.1"); // Proxy confiable
+            req.addHeader("X-Forwarded-For", "198.51.100." + i); // IP rotada en cada petición
+
+            ResponseEntity<AuthController.AuthResponse> r = authController.login(
+                    new AuthController.LoginRequest(targetUser, "claveRotada" + i, null),
+                    req
+            );
+            assertEquals(HttpStatus.UNAUTHORIZED.value(), r.getStatusCode().value(),
+                    "Intento " + i + " debe fallar con 401 antes de alcanzar el tope global");
+        }
+
+        // Intento 21 con una IP completamente NUEVA (por ejemplo 198.51.100.21)
+        MockHttpServletRequest req21 = new MockHttpServletRequest();
+        req21.setRemoteAddr("10.0.0.1");
+        req21.addHeader("X-Forwarded-For", "198.51.100.21");
+
+        ResponseEntity<AuthController.AuthResponse> blocked = authController.login(
+                new AuthController.LoginRequest(targetUser, "claveNueva21", null),
+                req21
+        );
+
+        assertEquals(HttpStatus.TOO_MANY_REQUESTS.value(), blocked.getStatusCode().value(),
+                "Tras el tope global de 20 intentos para el identificador, debe responder 429 incluso desde una nueva IP");
+        assertTrue(blocked.getBody().mensaje().contains("Demasiados intentos fallidos"));
     }
 }
