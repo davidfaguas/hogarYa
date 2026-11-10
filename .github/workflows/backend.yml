@@ -51,7 +51,7 @@ jobs:
             -e POSTGRES_USER=hogarya_app \
             -e POSTGRES_PASSWORD=hogarya_secret \
             -p 5432:5432 hogarya-bench-db
-          docker exec pg-bench sh -c 'until pg_isready -U hogarya_app -d hogarya_db; do sleep 1; done'
+          docker exec pg-bench sh -c 'until psql -U hogarya_app -d hogarya_db -c "SELECT 1" >/dev/null 2>&1; do sleep 1; done'
 
       - name: Apply Flyway Migrations (V1, V2_1, V2_2, V2_3)
         run: |
