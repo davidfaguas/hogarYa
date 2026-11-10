@@ -1,19 +1,30 @@
 # ==============================================================================
-# Dockerfile para Base de Datos de Prueba: PostgreSQL 16 + PostGIS 3.4 + pgvector
-# Resuelve Defecto 2: postgis/postgis:16-3.4 no incluye la extensión pgvector
+# Dockerfile para Base de Datos de Prueba: PostgreSQL 16 + PostGIS 3.4 + pgvector 0.8.0
+# Compila e instala pgvector v0.8.0 sobre la imagen oficial postgis/postgis:16-3.4
 # ==============================================================================
 FROM postgis/postgis:16-3.4
 
 LABEL maintainer="HogarYa Platform Architecture <arquitectura@hogarya.cl>"
-LABEL description="PostgreSQL 16 oficial con extensiones PostGIS 3.4 y pgvector 0.7 precompiladas"
+LABEL description="PostgreSQL 16 oficial con extensiones PostGIS 3.4 y pgvector 0.8.0 compiladas"
 
-# Instalar el paquete de extensión postgresql-16-pgvector de los repositorios de Debian
 USER root
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    postgresql-16-pgvector \
+    build-essential \
+    postgresql-server-dev-16 \
+    git \
+    ca-certificates \
+    && cd /tmp \
+    && git clone --branch v0.8.0 https://github.com/pgvector/pgvector.git \
+    && cd pgvector \
+    && make \
+    && make install \
+    && rm -rf /tmp/pgvector \
+    && apt-get purge -y build-essential postgresql-server-dev-16 git \
+    && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
-# Verificar la presencia de los archivos de control de ambas extensiones durante el build
+# Verificar la presencia de los archivos de control de ambas extensiones
 RUN ls -l /usr/share/postgresql/16/extension/postgis.control && \
     ls -l /usr/share/postgresql/16/extension/vector.control
 
