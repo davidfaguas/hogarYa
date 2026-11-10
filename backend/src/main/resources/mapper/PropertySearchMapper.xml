@@ -157,13 +157,18 @@
             FROM top_fts f
             FULL OUTER JOIN top_vec v ON f.id = v.id
         ),
-        <!-- Datos de la estación de Metro más cercana para el DTO -->
+        <!-- Datos de la estación de Metro más cercana para el DTO paginado -->
         metro_detalle AS (
             SELECT DISTINCT ON (p.id)
                 p.id AS propiedad_id,
                 em.nombre AS nombre_estacion,
                 ROUND(ST_Distance(p.ubicacion, em.ubicacion)::numeric, 1)::float8 AS distancia_metros
-            FROM rrf_unificado u
+            FROM (
+                SELECT id 
+                FROM rrf_unificado 
+                ORDER BY rrf_score DESC 
+                LIMIT #{limit} OFFSET #{offset}
+            ) u
             JOIN propiedad p ON p.id = u.id
             JOIN estacion_metro em ON ST_DWithin(p.ubicacion, em.ubicacion, COALESCE(#{criteria.metroDistanciaMaximaMts}, 800))
             WHERE em.activo = TRUE

@@ -235,10 +235,7 @@ top_fts AS (
       AND p.operacion = 'VENTA'
       AND p.tipo_propiedad = 'DEPARTAMENTO'
       AND p.precio_uf BETWEEN 2000 AND 6000
-      AND (
-          p.search_vector @@ websearch_to_tsquery('spanish', 'piscina metro')
-          OR p.titulo % 'piscina metro'
-      )
+      AND p.search_vector @@ websearch_to_tsquery('spanish', 'piscina metro')
     ORDER BY ts_rank_cd(p.search_vector, websearch_to_tsquery('spanish', 'piscina metro')) DESC
     LIMIT 200
 ),
@@ -254,7 +251,12 @@ metro_detalle AS (
         p.id AS propiedad_id,
         em.nombre AS nombre_estacion,
         ROUND(ST_Distance(p.ubicacion, em.ubicacion)::numeric, 1)::float8 AS distancia_metros
-    FROM rrf_unificado u
+    FROM (
+        SELECT id 
+        FROM rrf_unificado 
+        ORDER BY rrf_score DESC 
+        LIMIT 20 OFFSET 0
+    ) u
     JOIN propiedad p ON p.id = u.id
     JOIN estacion_metro em ON ST_DWithin(p.ubicacion, em.ubicacion, 1000)
     WHERE em.activo = TRUE
