@@ -1,0 +1,28 @@
+spring:
+  application:
+    name: hogarya-backend
+  datasource:
+    url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/hogarya_db}
+    username: ${SPRING_DATASOURCE_USERNAME:hogarya_app}
+    password: ${SPRING_DATASOURCE_PASSWORD:hogarya_secret}
+    driver-class-name: org.postgresql.Driver
+  flyway:
+    enabled: ${SPRING_FLYWAY_ENABLED:true}
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+mybatis:
+  mapper-locations: classpath:mapper/*.xml
+  type-handlers-package: cl.hogarya.infrastructure.persistence.handler
+
+hogarya:
+  security:
+    jwt:
+      secret: ${HOGARYA_JWT_SECRET:ClaveSecretaHogarYaChileSuperSegura2026DeAlMenos256BitsLongitudMinima}
+      issuer: https://hogarya.cl
+      expiration-minutes: 60
+    cookie:
+      secure: ${HOGARYA_COOKIE_SECURE:false}
+      same-site: ${HOGARYA_COOKIE_SAME_SITE:Lax}
+  outbox:
+    interval-ms: 2000

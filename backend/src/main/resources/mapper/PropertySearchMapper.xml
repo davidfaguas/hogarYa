@@ -1,0 +1,227 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="cl.hogarya.infrastructure.persistence.mapper.PropertySearchMapper">
+
+    <!-- ========================================================================= -->
+    <!-- CORRECCIÓN DEFECTO 10: Mapeo de Record Java 21 mediante <constructor><arg> -->
+    <!-- ========================================================================= -->
+    <resultMap id="SearchResultMap" type="cl.hogarya.domain.model.search.PropertySearchResultDto">
+        <constructor>
+            <idArg column="id" javaType="java.util.UUID"/>
+            <arg column="codigo_publicacion" javaType="java.lang.String"/>
+            <arg column="titulo" javaType="java.lang.String"/>
+            <arg column="operacion" javaType="java.lang.String"/>
+            <arg column="tipo_propiedad" javaType="java.lang.String"/>
+            <arg column="estado" javaType="java.lang.String"/>
+            <arg column="precio_uf" javaType="java.math.BigDecimal"/>
+            <arg column="precio_clp_estimado" javaType="java.math.BigDecimal"/>
+            <arg column="m2_util" javaType="java.math.BigDecimal"/>
+            <arg column="m2_total" javaType="java.math.BigDecimal"/>
+            <arg column="dormitorios" javaType="short"/>
+            <arg column="banos" javaType="short"/>
+            <arg column="estacionamientos" javaType="short"/>
+            <arg column="comuna_nombre" javaType="java.lang.String"/>
+            <arg column="barrio" javaType="java.lang.String"/>
+            <arg column="latitud" javaType="double"/>
+            <arg column="longitud" javaType="double"/>
+            <arg column="distancia_metro_metros" javaType="java.lang.Double"/>
+            <arg column="nombre_estacion_cercana" javaType="java.lang.String"/>
+            <arg column="tiene_tour_virtual" javaType="boolean"/>
+            <arg column="tiene_video" javaType="boolean"/>
+            <arg column="verificada" javaType="boolean"/>
+            <arg column="imagen_portada_url" javaType="java.lang.String"/>
+            <arg column="rrf_score" javaType="double"/>
+        </constructor>
+    </resultMap>
+
+    <!-- ========================================================================= -->
+    <!-- CORRECCIÓN DEFECTO 6: Filtros duros reutilizables compartidos con <sql>   -->
+    <!-- Usa EXISTS para radio al Metro evitando duplicación de filas              -->
+    <!-- ========================================================================= -->
+    <sql id="hardFilters">
+        p.activo = TRUE
+        <if test="criteria.operacion != null and criteria.operacion != ''">
+            AND p.operacion = #{criteria.operacion}
+        </if>
+        <if test="criteria.tipoPropiedad != null and criteria.tipoPropiedad != '' and criteria.tipoPropiedad != 'todos'">
+            AND p.tipo_propiedad = #{criteria.tipoPropiedad}
+        </if>
+        <if test="criteria.comunaId != null">
+            AND p.comuna_id = #{criteria.comunaId}
+        </if>
+        <if test="criteria.precioMinUf != null">
+            AND p.precio_uf &gt;= #{criteria.precioMinUf}
+        </if>
+        <if test="criteria.precioMaxUf != null">
+            AND p.precio_uf &lt;= #{criteria.precioMaxUf}
+        </if>
+        <if test="criteria.dormitoriosMin != null">
+            AND p.dormitorios &gt;= #{criteria.dormitoriosMin}
+        </if>
+        <if test="criteria.banosMin != null">
+            AND p.banos &gt;= #{criteria.banosMin}
+        </if>
+        <if test="criteria.subsidioDs19 != null and criteria.subsidioDs19">
+            AND p.subsidio_ds19 = TRUE
+        </if>
+        <if test="criteria.subsidioDs1 != null and criteria.subsidioDs1">
+            AND p.subsidio_ds1 = TRUE
+        </if>
+        <!-- Filtro espacial EXISTS: no duplica si hay múltiples estaciones dentro del radio -->
+        <if test="criteria.cercaMetro != null and criteria.cercaMetro">
+            AND EXISTS (
+                SELECT 1 
+                FROM estacion_metro em 
+                WHERE ST_DWithin(
+                    p.ubicacion, 
+                    em.ubicacion, 
+                    COALESCE(#{criteria.metroDistanciaMaximaMts}, 800)
+                ) 
+                AND em.activo = TRUE
+            )
+        </if>
+    </sql>
+
+    <!-- ========================================================================= -->
+    <!-- BÚSQUEDA HÍBRIDA (CORRECCIÓN DEFECTOS 3, 4, 5, 6, 10)                      -->
+    <!-- ========================================================================= -->
+    <select id="searchHybrid" resultMap="SearchResultMap">
+        <!-- Defecto 3: la UF debe ser <= CURRENT_DATE para no tomar fechas pre-publicadas futuras -->
+        WITH uf_actual AS (
+            SELECT valor AS uf_hoy 
+            FROM valor_uf 
+            WHERE fecha &lt;= CURRENT_DATE 
+            ORDER BY fecha DESC 
+            LIMIT 1
+        ),
+        <!-- Defecto 4 y 5: Top-K directo sobre la tabla usando índice GIN (tsvector + pg_trgm) -->
+        top_fts AS (
+            <choose>
+                <when test="criteria.rawQuery != null and criteria.rawQuery != ''">
+                    SELECT 
+                        p.id,
+                        ROW_NUMBER() OVER (
+                            ORDER BY (
+                                ts_rank_cd(p.search_vector, websearch_to_tsquery('spanish', public.immutable_unaccent(#{criteria.rawQuery}))) * 0.7 +
+                                similarity(p.titulo, #{criteria.rawQuery}) * 0.3
+                            ) DESC
+                        ) AS r_fts
+                    FROM propiedad p
+                    WHERE <include refid="hardFilters"/>
+                      AND (
+                          p.search_vector @@ websearch_to_tsquery('spanish', public.immutable_unaccent(#{criteria.rawQuery}))
+                          OR p.titulo % #{criteria.rawQuery}
+                      )
+                    ORDER BY (
+                        ts_rank_cd(p.search_vector, websearch_to_tsquery('spanish', public.immutable_unaccent(#{criteria.rawQuery}))) * 0.7 +
+                        similarity(p.titulo, #{criteria.rawQuery}) * 0.3
+                    ) DESC
+                    LIMIT #{topK}
+                </when>
+                <otherwise>
+                    SELECT p.id, 1::bigint AS r_fts
+                    FROM propiedad p
+                    WHERE <include refid="hardFilters"/>
+                    LIMIT #{topK}
+                </otherwise>
+            </choose>
+        ),
+        <!-- Defecto 4: Top-K directo sobre la tabla usando índice HNSW de pgvector -->
+        top_vec AS (
+            <choose>
+                <when test="embeddingVector != null">
+                    SELECT 
+                        p.id,
+                        ROW_NUMBER() OVER (
+                            ORDER BY p.embedding &lt;=&gt; #{embeddingVector, jdbcType=OTHER, typeHandler=cl.hogarya.infrastructure.persistence.handler.PgVectorTypeHandler} ASC
+                        ) AS r_vec
+                    FROM propiedad p
+                    WHERE <include refid="hardFilters"/>
+                      AND p.embedding IS NOT NULL
+                    ORDER BY p.embedding &lt;=&gt; #{embeddingVector, jdbcType=OTHER, typeHandler=cl.hogarya.infrastructure.persistence.handler.PgVectorTypeHandler} ASC
+                    LIMIT #{topK}
+                </when>
+                <otherwise>
+                    SELECT p.id, 1::bigint AS r_vec
+                    FROM top_fts p
+                </otherwise>
+            </choose>
+        ),
+        <!-- Fusión Reciprocal Rank Fusion (RRF) mediante FULL OUTER JOIN -->
+        rrf_unificado AS (
+            SELECT 
+                COALESCE(f.id, v.id) AS id,
+                COALESCE(1.0 / (60 + f.r_fts), 0.0) + COALESCE(1.0 / (60 + v.r_vec), 0.0) AS rrf_score
+            FROM top_fts f
+            FULL OUTER JOIN top_vec v ON f.id = v.id
+        ),
+        <!-- Datos de la estación de Metro más cercana para el DTO -->
+        metro_detalle AS (
+            SELECT DISTINCT ON (p.id)
+                p.id AS propiedad_id,
+                em.nombre AS nombre_estacion,
+                ROUND(ST_Distance(p.ubicacion, em.ubicacion)::numeric, 1)::float8 AS distancia_metros
+            FROM rrf_unificado u
+            JOIN propiedad p ON p.id = u.id
+            JOIN estacion_metro em ON ST_DWithin(p.ubicacion, em.ubicacion, COALESCE(#{criteria.metroDistanciaMaximaMts}, 800))
+            WHERE em.activo = TRUE
+            ORDER BY p.id, ST_Distance(p.ubicacion, em.ubicacion) ASC
+        )
+        SELECT 
+            p.id,
+            p.codigo_publicacion,
+            p.titulo,
+            p.operacion,
+            p.tipo_propiedad,
+            p.estado,
+            p.precio_uf,
+            ROUND(p.precio_uf * COALESCE(uf.uf_hoy, 37850), 0) AS precio_clp_estimado,
+            p.m2_util,
+            p.m2_total,
+            p.dormitorios,
+            p.banos,
+            p.estacionamientos,
+            c.nombre AS comuna_nombre,
+            p.barrio,
+            ST_Y(p.ubicacion::geometry) AS latitud,
+            ST_X(p.ubicacion::geometry) AS longitud,
+            md.distancia_metros AS distancia_metro_metros,
+            md.nombre_estacion AS nombre_estacion_cercana,
+            p.tiene_tour_virtual,
+            p.tiene_video,
+            p.verificada,
+            p.imagen_portada_url,
+            u.rrf_score
+        FROM rrf_unificado u
+        JOIN propiedad p ON p.id = u.id
+        JOIN comuna c ON c.id = p.comuna_id
+        LEFT JOIN uf_actual uf ON TRUE
+        LEFT JOIN metro_detalle md ON md.propiedad_id = p.id
+        ORDER BY 
+        <choose>
+            <when test="criteria.sortOption == 'menor_precio'">
+                p.precio_uf ASC
+            </when>
+            <when test="criteria.sortOption == 'mayor_precio'">
+                p.precio_uf DESC
+            </when>
+            <when test="criteria.sortOption == 'mas_recientes'">
+                p.publicada_el DESC
+            </when>
+            <otherwise>
+                u.rrf_score DESC, p.precio_uf ASC
+            </otherwise>
+        </choose>
+        LIMIT #{limit} OFFSET #{offset}
+    </select>
+
+    <!-- Conteo exacto reutilizando exactamente <include refid="hardFilters"/> -->
+    <select id="countByCriteria" resultType="long">
+        SELECT COUNT(p.id)
+        FROM propiedad p
+        WHERE <include refid="hardFilters"/>
+    </select>
+
+</mapper>

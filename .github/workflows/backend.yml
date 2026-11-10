@@ -1,0 +1,33 @@
+name: Backend CI - Java 21 & PostgreSQL / PostGIS / pgvector
+
+on:
+  push:
+    branches: [ "main", "master", "feature/**" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build-and-verify:
+    name: Maven Clean Verify (Java 21 + Testcontainers)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21 (Eclipse Temurin)
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Verify Docker environment
+        run: |
+          docker --version
+          docker info
+
+      - name: Execute Maven Clean Verify
+        working-directory: backend
+        run: mvn -B clean verify

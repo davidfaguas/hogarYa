@@ -1,0 +1,122 @@
+[
+  {
+    "id": 1,
+    "consulta": "casa con piscina en la florida",
+    "intencion": "Propiedad tipo CASA, comuna La Florida, con presencia de piscina en descripción o amenidades",
+    "esperados": ["HY-10001", "HY-10010"]
+  },
+  {
+    "id": 2,
+    "consulta": "cerca del metro en puente alto",
+    "intencion": "Propiedad a distancia caminable (<= 800m) de estación de Metro en Puente Alto",
+    "esperados": ["HY-10004"]
+  },
+  {
+    "id": 3,
+    "consulta": "casa estilo chilena con gran terreno y piscina",
+    "intencion": "Arquitectura chilena tradicional con tejas y m2 total amplio en Peñalolén",
+    "esperados": ["HY-10002"]
+  },
+  {
+    "id": 4,
+    "consulta": "townhouse entrega inmediata en maipu con subsidio",
+    "intencion": "Unidad nueva entrega inmediata en Maipú compatible con subsidio",
+    "esperados": ["HY-10003"]
+  },
+  {
+    "id": 5,
+    "consulta": "condominio exclusivo san damian las condes",
+    "intencion": "Alta gama en sector San Damián Las Condes con seguridad y piscina sin fin",
+    "esperados": ["HY-10005"]
+  },
+  {
+    "id": 6,
+    "consulta": "casa ley pereira restaurada cerca de metro en ñuñoa",
+    "intencion": "Patrimonio residencial Ley Pereira a pasos de Metro Chile-España",
+    "esperados": ["HY-10006"]
+  },
+  {
+    "id": 7,
+    "consulta": "casa en chicureo piedra roja con laguna",
+    "intencion": "Condominio en Piedra Roja Colina cercano a colegios y laguna",
+    "esperados": ["HY-10007"]
+  },
+  {
+    "id": 8,
+    "consulta": "venta directa por dueño sin comision en los dominicos",
+    "intencion": "Publicación sin comisión de corretaje en Las Condes Los Dominicos",
+    "esperados": ["HY-10008"]
+  },
+  {
+    "id": 9,
+    "consulta": "casa con porton automatico y cobertizo en el rosal maipu",
+    "intencion": "Microbarrio El Rosal en Maipú con patio y cobertizo",
+    "esperados": ["HY-10009"]
+  },
+  {
+    "id": 10,
+    "consulta": "condominio mirador bellavista la florida con conserjeria",
+    "intencion": "Condominio cerrado cerca de Metro Bellavista y Vespucio Sur",
+    "esperados": ["HY-10010"]
+  },
+  {
+    "id": 11,
+    "consulta": "parcela de agrado con derechos de agua y piscina en chicureo",
+    "intencion": "Terreno 5.000 m2 con derechos de agua y casa en madera nativa",
+    "esperados": ["HY-10011"]
+  },
+  {
+    "id": 12,
+    "consulta": "casa primera linea vista al mar con jacuzzi en concon",
+    "intencion": "Vista panorámica acantilado en Costa de Montemar Concón",
+    "esperados": ["HY-10012"]
+  },
+  {
+    "id": 13,
+    "consulta": "casa con subsidio ds19 en santiago",
+    "intencion": "Propiedad homologada para integración social Minvu DS19",
+    "esperados": ["HY-10004"]
+  },
+  {
+    "id": 14,
+    "consulta": "casa mediterranea con quincho techado y riego automatico",
+    "intencion": "Estilo mediterráneo con quincho y jardín formado",
+    "esperados": ["HY-10001"]
+  },
+  {
+    "id": 15,
+    "consulta": "casa 5 dormitorios y 4 baños en las condes",
+    "intencion": "Gran metraje y programa habitacional amplio en sector oriente",
+    "esperados": ["HY-10005", "HY-10008"]
+  },
+  {
+    "id": 16,
+    "consulta": "casa con azotea mirador y ventanas termopanel en maipu",
+    "intencion": "Eficiencia térmica y terraza azotea",
+    "esperados": ["HY-10003"]
+  },
+  {
+    "id": 17,
+    "consulta": "casa con tejas y vigas a la vista en las pircas",
+    "intencion": "Barrio Las Pircas Peñalolén con vista cordillera",
+    "esperados": ["HY-10002"]
+  },
+  {
+    "id": 18,
+    "consulta": "casa patrimonial para remodelar con patio interior en santiago centro",
+    "intencion": "Inmueble de conservación histórica Barrio Huemul",
+    "esperados": ["HY-10013"]
+  },
+  {
+    "id": 19,
+    "consulta": "casa con chimenea y barandas de cristal frente a las dunas",
+    "intencion": "Costanera Concón frente a la bahía y dunas",
+    "esperados": ["HY-10012"]
+  },
+  {
+    "id": 20,
+    "consulta": "casa con suite en primer piso hidromasaje cerca de colegio aleman",
+    "intencion": "Chicureo sector colegios con dormitorio principal en suite",
+    "esperados": ["HY-10007"]
+  }
+]
