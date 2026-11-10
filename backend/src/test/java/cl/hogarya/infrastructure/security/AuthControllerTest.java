@@ -9,11 +9,16 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.security.crypto.password.PasswordEncoder;
 
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.ZoneId;
 import java.util.Optional;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-@DisplayName("Seguridad: AuthController valida contraseñas con BCrypt, normaliza RUT y limita intentos")
+@DisplayName("Seguridad: AuthController valida contraseñas con BCrypt, normaliza RUT, aplica rate limit (user+IP) con expiración y fake hash del mismo strength")
 class AuthControllerTest {
 
     private final PasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
@@ -62,7 +67,6 @@ class AuthControllerTest {
         String rawPassword = "password123!";
         String bcryptHash = passwordEncoder.encode(rawPassword);
 
-        // El lookup busca el RUT canónico '11111112-K'
         AuthController.UserLookup userLookup = identifier -> {
             if ("11111112-K".equals(identifier)) {
                 return Optional.of(new AuthController.UsuarioAuth("11111112-K", "persona@hogarya.cl", bcryptHash, "ROLE_PERSONA", true));
@@ -72,7 +76,6 @@ class AuthControllerTest {
 
         AuthController authController = AuthController.forTesting(tokenService, passwordEncoder, userLookup, true, "Strict");
 
-        // El usuario ingresa su RUT con puntos y 'k' minúscula: '11.111.112-k'
         ResponseEntity<AuthController.AuthResponse> response = authController.login(
                 new AuthController.LoginRequest("11.111.112-k", rawPassword, null)
         );
@@ -104,7 +107,7 @@ class AuthControllerTest {
     }
 
     @Test
-    @DisplayName("Login con usuario inexistente ejecuta hash dummy (timing mitigation) y devuelve 401 SIN Set-Cookie")
+    @DisplayName("Login con usuario inexistente ejecuta hash dummy con mismo strength y devuelve 401 SIN Set-Cookie")
     void shouldReturn401WithoutSetCookieWhenUserDoesNotExist() {
         AuthController.UserLookup emptyLookup = identifier -> Optional.empty();
 
@@ -119,28 +122,96 @@ class AuthControllerTest {
     }
 
     @Test
-    @DisplayName("Bloqueo de intentos: tras 5 intentos fallidos devuelve 429 Too Many Requests")
-    void shouldBlockAfterMaxFailedAttempts() {
+    @DisplayName("Fake hash tiene el mismo strength (cost factor 10) que los hashes reales del PasswordEncoder")
+    void shouldEnsureDummyHashHasExactSameStrengthAsRealPasswordEncoder() {
+        AuthController.UserLookup emptyLookup = identifier -> Optional.empty();
+        AuthController authController = AuthController.forTesting(tokenService, passwordEncoder, emptyLookup, true, "Strict");
+
+        String dummyHash = authController.getDummyPasswordHash();
+        assertNotNull(dummyHash, "El dummy hash no debe ser nulo");
+        assertTrue(dummyHash.startsWith("$2a$10$") || dummyHash.startsWith("$2b$10$"),
+                "El hash dummy debe tener exactamente el cost factor 10 igual a los hashes reales de BCryptPasswordEncoder");
+        assertFalse(passwordEncoder.matches("passwordInvalida", dummyHash));
+    }
+
+    @Test
+    @DisplayName("Rate limiting por clave compuesta (identificador + IP): 5 intentos fallidos desde IP1 no bloquean a IP2")
+    void shouldTrackRateLimitByCompositeKeyIdentifierAndIp() {
         AuthController.UserLookup emptyLookup = identifier -> Optional.empty();
         AuthController authController = AuthController.forTesting(tokenService, passwordEncoder, emptyLookup, true, "Strict");
 
         String targetUser = "victima@hogarya.cl";
+        String attackerIp = "192.168.1.50";
+        String legitimateUserIp = "192.168.1.99";
 
-        // Realizar 5 intentos fallidos
+        // 5 intentos fallidos desde la IP del atacante
         for (int i = 0; i < 5; i++) {
             ResponseEntity<AuthController.AuthResponse> r = authController.login(
-                    new AuthController.LoginRequest(targetUser, "claveInvalida" + i, null)
+                    new AuthController.LoginRequest(targetUser, "claveInvalida" + i, null),
+                    attackerIp
             );
             assertEquals(HttpStatus.UNAUTHORIZED.value(), r.getStatusCode().value());
         }
 
-        // El sexto intento debe ser rechazado con 429 TOO_MANY_REQUESTS
+        // El 6to intento desde la IP atacante debe ser bloqueado con 429
         ResponseEntity<AuthController.AuthResponse> blockedResponse = authController.login(
-                new AuthController.LoginRequest(targetUser, "otraClave", null)
+                new AuthController.LoginRequest(targetUser, "otraClave", null),
+                attackerIp
         );
-
         assertEquals(HttpStatus.TOO_MANY_REQUESTS.value(), blockedResponse.getStatusCode().value());
         assertTrue(blockedResponse.getBody().mensaje().contains("Demasiados intentos fallidos"));
+
+        // Un intento para el mismo usuario desde OTRA IP (usuario legítimo) NO debe estar bloqueado (retorna 401, no 429)
+        ResponseEntity<AuthController.AuthResponse> legitResponse = authController.login(
+                new AuthController.LoginRequest(targetUser, "intentoLegitimo", null),
+                legitimateUserIp
+        );
+        assertEquals(HttpStatus.UNAUTHORIZED.value(), legitResponse.getStatusCode().value(),
+                "La IP legítima no debe verse afectada por el bloqueo de la IP atacante");
+    }
+
+    @Test
+    @DisplayName("Expiración de Rate Limit: tras 15 minutos el bloqueo expira y permite nuevos intentos")
+    void shouldExpireRateLimitLockoutAfterDuration() {
+        AuthController.UserLookup emptyLookup = identifier -> Optional.empty();
+
+        AtomicReference<Instant> currentInstant = new AtomicReference<>(Instant.parse("2026-11-10T20:00:00Z"));
+        Clock testClock = new Clock() {
+            @Override
+            public ZoneId getZone() { return ZoneId.of("UTC"); }
+            @Override
+            public Clock withZone(ZoneId zone) { return this; }
+            @Override
+            public Instant instant() { return currentInstant.get(); }
+        };
+
+        AuthController authController = AuthController.forTestingWithClock(
+                tokenService, passwordEncoder, emptyLookup, true, "Strict", testClock
+        );
+
+        String user = "bloqueo@hogarya.cl";
+        String ip = "10.0.0.1";
+
+        // Realizar 5 intentos para bloquear
+        for (int i = 0; i < 5; i++) {
+            authController.login(new AuthController.LoginRequest(user, "clave" + i, null), ip);
+        }
+
+        // Confirmar bloqueo
+        ResponseEntity<AuthController.AuthResponse> blocked = authController.login(
+                new AuthController.LoginRequest(user, "intento6", null), ip
+        );
+        assertEquals(HttpStatus.TOO_MANY_REQUESTS.value(), blocked.getStatusCode().value());
+
+        // Avanzar el reloj 16 minutos (la duración de bloqueo es 15 minutos)
+        currentInstant.set(currentInstant.get().plus(Duration.ofMinutes(16)));
+
+        // Tras la expiración, el intento es procesado nuevamente (retorna 401 por credencial inválida, no 429)
+        ResponseEntity<AuthController.AuthResponse> postExpiration = authController.login(
+                new AuthController.LoginRequest(user, "intentoPostExpiracion", null), ip
+        );
+        assertEquals(HttpStatus.UNAUTHORIZED.value(), postExpiration.getStatusCode().value(),
+                "Tras expirar el período de 15 minutos, no debe retornar 429");
     }
 
     @Test

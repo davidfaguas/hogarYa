@@ -6,7 +6,7 @@
 -- Toda medición de latencia o planes de ejecución generados en este script deben interpretarse como:
 -- [PROYECCIÓN NO MEDIDA EN ESTE SANDBOX] hasta que sean ejecutados sobre hardware PostgreSQL dedicado.
 -- El Recall@10 calculado evalúa la FIDELIDAD DEL ÍNDICE (recall algorítmico HNSW vs búsqueda secuencial
--- exhaustiva exacta), NO la calidad semántica percibida por el usuario final.
+-- exhaustiva exacta sobre distancias con vectores únicos), NO la calidad semántica percibida.
 -- ====================================================================================================
 
 \set ON_ERROR_STOP on
@@ -35,16 +35,24 @@ INSERT INTO organizacion (
     'contacto@hogarya.cl'
 ) ON CONFLICT (id) DO NOTHING;
 
--- Pool temporal de 500 vectores de 768 dimensiones para generación determinista de alto rendimiento
-CREATE TEMP TABLE vector_pool AS
+-- Pool de vectores base (2.000 vectores de 768 dims) + Pool de perturbación de ruido (50 vectores)
+-- Genera 2000 x 50 = 100.000 combinaciones estrictamente ÚNICAS de embeddings
+CREATE TEMP TABLE vector_base_pool AS
 SELECT p AS pool_id,
-       ('[' || array_to_string(array_agg(round(((sin(p * 768 + s))::numeric), 4)), ', ') || ']')::vector(768) AS vec
-FROM generate_series(0, 499) p,
+       ('[' || array_to_string(array_agg(round(((sin(p * 768 + s))::numeric), 4)), ', ') || ']')::vector(768) AS base_vec
+FROM generate_series(0, 1999) p,
      generate_series(1, 768) s
 GROUP BY p;
 
+CREATE TEMP TABLE vector_noise_pool AS
+SELECT n AS noise_id,
+       ('[' || array_to_string(array_agg(round(((cos(n * 768 + s) * 0.005)::numeric), 6)), ', ') || ']')::vector(768) AS noise_vec
+FROM generate_series(0, 49) n,
+     generate_series(1, 768) s
+GROUP BY n;
+
 -- 1. Generación sintética de 100.000 propiedades representativas del mercado chileno
--- Integridad contra V1: columnas reales (m2_util, m2_total, direccion_referencial, comuna_id smallint)
+-- Datos descorrelacionados con combinaciones reales de VENTA + DEPARTAMENTO y proximidad a Metro
 INSERT INTO propiedad (
     id,
     codigo_publicacion,
@@ -71,31 +79,27 @@ SELECT
     gen_random_uuid(),
     'SYN-' || lpad(i::text, 6, '0'),
     '00000000-0000-0000-0000-000000000001'::uuid,
-    'Propiedad ' || i || ' en ' || (ARRAY['Ñuñoa', 'Providencia', 'Las Condes', 'Santiago', 'La Florida', 'Maipú'])[1 + (i % 6)],
-    'Excelente propiedad luminosa cercana a comercio, áreas verdes, servicios y estación de metro. ' ||
-    (ARRAY['Con piscina y quincho.', 'Vista despejada a la cordillera.', 'Ideal para familias.', 'Bajos gastos comunes.'])[1 + (i % 4)],
-    CASE (i % 4)
-        WHEN 0 THEN 'DEPARTAMENTO'
-        WHEN 1 THEN 'CASA'
-        WHEN 2 THEN 'OFICINA'
-        ELSE 'PARCELA'
-    END,
-    CASE WHEN (i % 4 = 0) THEN 'ARRIENDO' ELSE 'VENTA' END,
+    'Propiedad ' || i || ' departamento piscina metro ' || (ARRAY['Ñuñoa', 'Providencia', 'Las Condes', 'Santiago', 'La Florida', 'Maipú'])[1 + (i % 6)],
+    'Excelente departamento luminoso con piscina y quincho, cercano a comercio, areas verdes y estacion de metro.',
+    (ARRAY['DEPARTAMENTO', 'CASA', 'OFICINA', 'PARCELA'])[1 + (i % 4)],
+    CASE WHEN ((i / 4) % 2 = 0) THEN 'VENTA' ELSE 'ARRIENDO' END,
     'USADA',
-    round((1500 + (random() * 16500))::numeric, 2),
-    round((35 + (random() * 200))::numeric, 1),
-    round((40 + (random() * 250))::numeric, 1),
-    (1 + (i % 5))::smallint,
+    round((2000 + ((i * 37) % 5500))::numeric, 2), -- Rango controlado entre 2000 y 7500 UF
+    round((40 + (i % 120))::numeric, 1),
+    round((50 + (i % 150))::numeric, 1),
     (1 + (i % 4))::smallint,
+    (1 + (i % 3))::smallint,
     (1 + (i % 6))::smallint, -- Comuna IDs 1 al 6 (smallint FK a comuna.id)
     'Av. Principal ' || i,
     (ARRAY['Plaza Ñuñoa', 'El Golf', 'San Carlos', 'Bellavista', 'Centro', 'Pajaritos'])[1 + (i % 6)],
-    ST_SetSRID(ST_MakePoint(-70.65 + (random() - 0.5) * 0.25, -33.45 + (random() - 0.5) * 0.25), 4326)::geography,
+    -- Ubicación en radio < 800m de estaciones de Metro L4 (La Florida / Puente Alto)
+    ST_SetSRID(ST_MakePoint(-70.598 + (((i % 100) - 50) * 0.0001), -33.525 + (((i % 100) - 50) * 0.0001)), 4326)::geography,
     (i % 10 = 0),
     true,
-    vp.vec
+    (bp.base_vec + np.noise_vec)
 FROM generate_series(1, 100000) AS i
-JOIN vector_pool vp ON vp.pool_id = (i % 500);
+JOIN vector_base_pool bp ON bp.pool_id = (i % 2000)
+JOIN vector_noise_pool np ON np.noise_id = ((i / 2000) % 50);
 
 COMMIT;
 
@@ -106,15 +110,83 @@ ANALYZE estacion_metro;
 ANALYZE valor_uf;
 
 -- Extraer vector de consulta representativo del pool hacia variable psql q_vec
-SELECT vec::text AS q_vec FROM vector_pool WHERE pool_id = 0 \gset
+SELECT (base_vec + noise_vec)::text AS q_vec
+FROM vector_base_pool bp, vector_noise_pool np
+WHERE bp.pool_id = 0 AND np.noise_id = 0 \gset
 
--- 3. Configuración para búsqueda vectorial con índice HNSW
+-- ====================================================================================================
+-- 3. DIAGNÓSTICO: RECUENTO TOP-200 VECTORIAL CON FILTROS DUROS (CON Y SIN ITERATIVE SCAN)
+-- ====================================================================================================
+CREATE TEMP TABLE diagnostico_iterative_scan (
+    configuracion text,
+    ef_search int,
+    iterative_scan text,
+    max_scan_tuples text,
+    filas_devueltas int
+);
+
+-- Caso A: Sin iterative_scan (iterative_scan = off)
 SET hnsw.ef_search = 200;
+SET hnsw.iterative_scan = off;
+
+INSERT INTO diagnostico_iterative_scan
+SELECT
+    'Sin iterative_scan (standard HNSW)',
+    200,
+    'off',
+    'default',
+    count(*)
+FROM (
+    SELECT id
+    FROM propiedad
+    WHERE activo = true
+      AND operacion = 'VENTA'
+      AND tipo_propiedad = 'DEPARTAMENTO'
+      AND precio_uf BETWEEN 2000 AND 6000
+    ORDER BY embedding <=> :'q_vec'::vector(768)
+    LIMIT 200
+) sub;
+
+-- Caso B: Con iterative_scan = relaxed_order y max_scan_tuples ajustado
+SET hnsw.ef_search = 200;
+SET hnsw.iterative_scan = relaxed_order;
+SET hnsw.max_scan_tuples = 50000;
+
+INSERT INTO diagnostico_iterative_scan
+SELECT
+    'Con iterative_scan = relaxed_order (ajustado)',
+    200,
+    'relaxed_order',
+    '50000',
+    count(*)
+FROM (
+    SELECT id
+    FROM propiedad
+    WHERE activo = true
+      AND operacion = 'VENTA'
+      AND tipo_propiedad = 'DEPARTAMENTO'
+      AND precio_uf BETWEEN 2000 AND 6000
+    ORDER BY embedding <=> :'q_vec'::vector(768)
+    LIMIT 200
+) sub;
+
+\echo '===================================================================================================='
+\echo 'DIAGNÓSTICO HNSW: FILAS DEVUELTAS EN TOP-200 CON FILTROS DUROS'
+\echo '===================================================================================================='
+SELECT configuracion, ef_search, iterative_scan, max_scan_tuples, filas_devueltas FROM diagnostico_iterative_scan;
+
+-- ====================================================================================================
+-- 4. EXPLAIN (ANALYZE, BUFFERS): CONSULTA HÍBRIDA COMPLETA DEL MAPPER (FILTROS + FTS + VECTOR + RRF)
+-- ====================================================================================================
+SET hnsw.ef_search = 200;
+SET hnsw.iterative_scan = relaxed_order;
+SET hnsw.max_scan_tuples = 50000;
 SET work_mem = '64MB';
 SET enable_seqscan = off;
 
--- 4. EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
--- Búsqueda híbrida real: Filtros duros + Proximidad a Metro + Fusión RRF (Vector HNSW + GIN FTS)
+\echo '===================================================================================================='
+\echo 'EXPLAIN (ANALYZE, BUFFERS): PLAN DE EJECUCIÓN CONSULTA HÍBRIDA REAL'
+\echo '===================================================================================================='
 EXPLAIN (ANALYZE, BUFFERS)
 WITH top_vector AS (
     SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> :'q_vec'::vector(768)) as rank_vec
@@ -159,9 +231,7 @@ ORDER BY rrf.rrf_score DESC
 LIMIT 20;
 
 -- ====================================================================================================
--- EVALUACIÓN DE RECALL@10: FIDELIDAD DEL ÍNDICE (HNSW vs BÚSQUEDA EXHAUSTIVA)
--- ====================================================================================================
--- Recall@10 = |Top10_HNSW ∩ Top10_Exacto| / 10.0 con ef_search=200
+-- 5. EVALUACIÓN DE RECALL@10: FIDELIDAD DEL ÍNDICE SOBRE DISTANCIAS CON VECTORES ÚNICOS
 -- ====================================================================================================
 CREATE TEMP TABLE IF NOT EXISTS benchmark_metrics (
     metrica text,
@@ -174,58 +244,73 @@ TRUNCATE benchmark_metrics;
 DO $$
 DECLARE
     v_query vector(768);
-    v_top_hnsw uuid[];
-    v_top_exact uuid[];
-    v_intersection_count int;
+    v_exact_dists float8[];
+    v_hnsw_dists float8[];
+    v_matches int := 0;
     v_recall numeric;
+    d float8;
+    max_exact_dist float8;
 BEGIN
-    SELECT vec INTO v_query FROM vector_pool WHERE pool_id = 0;
+    -- Query vector representativo único
+    SELECT (base_vec + noise_vec) INTO v_query
+    FROM vector_base_pool bp, vector_noise_pool np
+    WHERE bp.pool_id = 7 AND np.noise_id = 13;
 
-    -- 1. Búsqueda con índice HNSW habilitado y ef_search = 200
+    -- 1. Búsqueda exacta exhaustiva (SeqScan forzado)
+    SET LOCAL enable_indexscan = off;
+    SET LOCAL enable_seqscan = on;
+
+    SELECT array_agg(dist) INTO v_exact_dists
+    FROM (
+        SELECT (embedding <=> v_query) AS dist
+        FROM propiedad
+        WHERE activo = true
+        ORDER BY embedding <=> v_query
+        LIMIT 10
+    ) sub;
+
+    -- 2. Búsqueda aproximada HNSW (ef_search = 200, IndexScan forzado)
     SET LOCAL enable_seqscan = off;
     SET LOCAL enable_indexscan = on;
     SET LOCAL hnsw.ef_search = 200;
 
-    SELECT array_agg(id) INTO v_top_hnsw
+    SELECT array_agg(dist) INTO v_hnsw_dists
     FROM (
-        SELECT id FROM propiedad
+        SELECT (embedding <=> v_query) AS dist
+        FROM propiedad
         WHERE activo = true
         ORDER BY embedding <=> v_query
         LIMIT 10
     ) sub;
 
-    -- 2. Búsqueda exhaustiva exacta (fuerza Seq Scan)
-    SET LOCAL enable_indexscan = off;
-    SET LOCAL enable_seqscan = on;
+    -- 3. Medir coincidencias sobre distancias (tolerancia de punto flotante 1e-4)
+    max_exact_dist := v_exact_dists[10];
+    FOREACH d IN ARRAY v_hnsw_dists
+    LOOP
+        IF d <= (max_exact_dist + 0.0001) THEN
+            v_matches := v_matches + 1;
+        END IF;
+    END LOOP;
 
-    SELECT array_agg(id) INTO v_top_exact
-    FROM (
-        SELECT id FROM propiedad
-        WHERE activo = true
-        ORDER BY embedding <=> v_query
-        LIMIT 10
-    ) sub;
-
-    -- 3. Calcular intersección
-    SELECT count(*) INTO v_intersection_count
-    FROM unnest(v_top_hnsw) h
-    WHERE h = ANY(v_top_exact);
-
-    v_recall := round((v_intersection_count::numeric / 10.0), 3);
+    v_recall := round((v_matches::numeric / 10.0), 3);
 
     INSERT INTO benchmark_metrics (metrica, recall, coincidencias, rotulo)
     VALUES (
         'Recall@10',
         v_recall,
-        v_intersection_count || '/10',
-        'FIDELIDAD DEL ÍNDICE ALGORÍTMICO (HNSW vs EXHAUSTIVO), NO CALIDAD SEMÁNTICA'
+        v_matches || '/10',
+        'FIDELIDAD DEL ÍNDICE ALGORÍTMICO (DISTANCIAS HNSW vs EXHAUSTIVO SOBRE VECTORES ÚNICOS)'
     );
 
     RAISE NOTICE '=======================================================';
-    RAISE NOTICE 'MÉTRICA DE FIDELIDAD DEL ÍNDICE (HNSW vs EXHAUSTIVO):';
-    RAISE NOTICE 'Recall@10 calculado: % (Coincidencias: %/10)', v_recall, v_intersection_count;
+    RAISE NOTICE 'MÉTRICA DE FIDELIDAD DEL ÍNDICE SOBRE DISTANCIAS:';
+    RAISE NOTICE 'Recall@10 calculado: % (Coincidencias en distancia: %/10)', v_recall, v_matches;
+    RAISE NOTICE 'Distancia max top-10 exacto: %', max_exact_dist;
     RAISE NOTICE 'Rotulado: FIDELIDAD DEL ÍNDICE ALGORÍTMICO, NO CALIDAD SEMÁNTICA';
     RAISE NOTICE '=======================================================';
 END $$;
 
+\echo '===================================================================================================='
+\echo 'TABLA DE MÉTRICA DE FIDELIDAD (RECALL@10)'
+\echo '===================================================================================================='
 SELECT metrica, recall, coincidencias, rotulo FROM benchmark_metrics;

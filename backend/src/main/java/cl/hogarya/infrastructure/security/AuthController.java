@@ -1,6 +1,7 @@
 package cl.hogarya.infrastructure.security;
 
 import cl.hogarya.domain.model.identity.ChileanRut;
+import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpHeaders;
@@ -11,6 +12,7 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -22,8 +24,8 @@ import java.util.concurrent.ConcurrentMap;
  * Controlador de Autenticación.
  * Emite la cookie JWT de sesión con directivas de alta seguridad tras validar credenciales con BCrypt:
  * - Normalización de RUT vía ChileanRut.of(...)
- * - Mitigación de Timing Attacks (compara contra dummy hash si el usuario no existe)
- * - Rate limiting / Limitación de intentos de inicio de sesión fallidos
+ * - Mitigación de Timing Attacks (compara contra dummy hash generado con el mismo strength que los reales)
+ * - Rate limiting por tupla (identificador + IP) con expiración de 15 minutos
  * - HttpOnly: inaccesible para scripts frontend (prevención de robo XSS)
  * - Secure: transmisión restringida a canales cifrados HTTPS
  * - SameSite: prevención de ataques CSRF
@@ -32,7 +34,6 @@ import java.util.concurrent.ConcurrentMap;
 @RequestMapping("/api/v1/auth")
 public class AuthController {
 
-    private static final String DUMMY_BCRYPT_HASH = "$2a$10$7EqJtq98hPqEX7fNZaFWoOhi5w7yWzFmR1rW3d3.5F4O1fJ92dG7W";
     private static final int MAX_FAILED_ATTEMPTS = 5;
     private static final Duration LOCKOUT_DURATION = Duration.ofMinutes(15);
 
@@ -41,6 +42,8 @@ public class AuthController {
     private final UserLookup userLookup;
     private final boolean secureCookie;
     private final String sameSite;
+    private final String dummyPasswordHash;
+    private final Clock clock;
     private final ConcurrentMap<String, AttemptInfo> loginAttempts = new ConcurrentHashMap<>();
 
     record AttemptInfo(int count, Instant lastAttempt) {}
@@ -72,7 +75,8 @@ public class AuthController {
                         .query(UsuarioAuth.class)
                         .optional(),
                 secureCookie,
-                sameSite
+                sameSite,
+                Clock.systemUTC()
         );
     }
 
@@ -83,7 +87,18 @@ public class AuthController {
             boolean secureCookie,
             String sameSite
     ) {
-        return new AuthController(jwtTokenService, passwordEncoder, userLookup, secureCookie, sameSite);
+        return new AuthController(jwtTokenService, passwordEncoder, userLookup, secureCookie, sameSite, Clock.systemUTC());
+    }
+
+    public static AuthController forTestingWithClock(
+            JwtTokenService jwtTokenService,
+            PasswordEncoder passwordEncoder,
+            UserLookup userLookup,
+            boolean secureCookie,
+            String sameSite,
+            Clock clock
+    ) {
+        return new AuthController(jwtTokenService, passwordEncoder, userLookup, secureCookie, sameSite, clock);
     }
 
     private AuthController(
@@ -91,20 +106,47 @@ public class AuthController {
             PasswordEncoder passwordEncoder,
             UserLookup userLookup,
             boolean secureCookie,
-            String sameSite
+            String sameSite,
+            Clock clock
     ) {
         this.jwtTokenService = jwtTokenService;
         this.passwordEncoder = passwordEncoder;
         this.userLookup = userLookup;
         this.secureCookie = secureCookie;
         this.sameSite = sameSite;
+        this.clock = clock;
+        // Hash dummy generado usando el mismo PasswordEncoder (mismo algoritmo y cost factor/strength que los reales)
+        this.dummyPasswordHash = passwordEncoder.encode("hogarya-timing-mitigation-dummy-password");
+    }
+
+    public String getDummyPasswordHash() {
+        return dummyPasswordHash;
     }
 
     public record LoginRequest(String username, String password, String rut) {}
     public record AuthResponse(String username, String mensaje) {}
 
     @PostMapping("/login")
-    public ResponseEntity<AuthResponse> login(@RequestBody LoginRequest request) {
+    public ResponseEntity<AuthResponse> login(
+            @RequestBody LoginRequest request,
+            HttpServletRequest httpRequest
+    ) {
+        String clientIp = resolveClientIp(httpRequest);
+        return executeLogin(request, clientIp);
+    }
+
+    /**
+     * Sobrecarga de conveniencia para testing directo
+     */
+    public ResponseEntity<AuthResponse> login(LoginRequest request) {
+        return executeLogin(request, "127.0.0.1");
+    }
+
+    public ResponseEntity<AuthResponse> login(LoginRequest request, String clientIp) {
+        return executeLogin(request, clientIp != null ? clientIp : "127.0.0.1");
+    }
+
+    private ResponseEntity<AuthResponse> executeLogin(LoginRequest request, String clientIp) {
         if (request == null || request.username() == null || request.username().isBlank()
                 || request.password() == null || request.password().isBlank()) {
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
@@ -115,8 +157,9 @@ public class AuthController {
         String rawIdentifier = request.username().trim();
         String normalizedIdentifier = normalizeIdentifier(rawIdentifier, request.rut());
 
-        // 2. Control de Tasa / Límite de Intentos Fallidos
-        if (isBlocked(normalizedIdentifier)) {
+        // 2. Control de Tasa / Límite de Intentos Fallidos por clave compuesta: (identificador + IP)
+        String rateLimitKey = normalizedIdentifier + "@" + clientIp;
+        if (isBlocked(rateLimitKey)) {
             return ResponseEntity.status(HttpStatus.TOO_MANY_REQUESTS)
                     .body(new AuthResponse(null, "Demasiados intentos fallidos. Intente más tarde"));
         }
@@ -124,23 +167,23 @@ public class AuthController {
         Optional<UsuarioAuth> usuarioOpt = userLookup.findByIdentifier(normalizedIdentifier);
 
         // 3. Mitigación de Timing Attacks:
-        // Si el usuario no existe, ejecutar matches contra hash dummy para tiempo constante
+        // Si el usuario no existe, ejecutar matches contra hash dummy con el mismo strength para tiempo constante
         if (usuarioOpt.isEmpty()) {
-            passwordEncoder.matches(request.password(), DUMMY_BCRYPT_HASH);
-            recordFailedAttempt(normalizedIdentifier);
+            passwordEncoder.matches(request.password(), dummyPasswordHash);
+            recordFailedAttempt(rateLimitKey);
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
                     .body(new AuthResponse(null, "Credenciales inválidas"));
         }
 
         UsuarioAuth usuario = usuarioOpt.get();
         if (!usuario.activo() || !passwordEncoder.matches(request.password(), usuario.passwordHash())) {
-            recordFailedAttempt(normalizedIdentifier);
+            recordFailedAttempt(rateLimitKey);
             return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
                     .body(new AuthResponse(null, "Credenciales inválidas"));
         }
 
-        // Éxito: restablecer intentos fallidos
-        resetAttempts(normalizedIdentifier);
+        // Éxito: restablecer intentos fallidos para esta tupla (identificador + IP)
+        resetAttempts(rateLimitKey);
 
         String username = usuario.email();
         String rut = usuario.rut();
@@ -176,6 +219,16 @@ public class AuthController {
                 .body(new AuthResponse(null, "Sesión cerrada exitosamente"));
     }
 
+    private static String resolveClientIp(HttpServletRequest request) {
+        if (request == null) return "127.0.0.1";
+        String xForwardedFor = request.getHeader("X-Forwarded-For");
+        if (xForwardedFor != null && !xForwardedFor.isBlank()) {
+            return xForwardedFor.split(",")[0].trim();
+        }
+        String remoteAddr = request.getRemoteAddr();
+        return (remoteAddr != null && !remoteAddr.isBlank()) ? remoteAddr : "127.0.0.1";
+    }
+
     private String normalizeIdentifier(String rawIdentifier, String explicitRut) {
         if (explicitRut != null && !explicitRut.isBlank()) {
             try {
@@ -193,7 +246,8 @@ public class AuthController {
     private boolean isBlocked(String key) {
         AttemptInfo info = loginAttempts.get(key);
         if (info == null) return false;
-        if (Duration.between(info.lastAttempt(), Instant.now()).compareTo(LOCKOUT_DURATION) > 0) {
+        Instant now = clock.instant();
+        if (Duration.between(info.lastAttempt(), now).compareTo(LOCKOUT_DURATION) > 0) {
             loginAttempts.remove(key);
             return false;
         }
@@ -202,7 +256,7 @@ public class AuthController {
 
     private void recordFailedAttempt(String key) {
         loginAttempts.compute(key, (k, old) -> {
-            Instant now = Instant.now();
+            Instant now = clock.instant();
             if (old == null || Duration.between(old.lastAttempt(), now).compareTo(LOCKOUT_DURATION) > 0) {
                 return new AttemptInfo(1, now);
             }
