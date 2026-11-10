@@ -6,5 +6,6 @@ coverage/
 *.log
 target/
 backend/target/
+.aistudio/
 .env*
 !.env.example

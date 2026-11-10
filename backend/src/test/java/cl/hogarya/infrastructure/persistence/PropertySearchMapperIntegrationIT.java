@@ -11,6 +11,7 @@ import org.junit.jupiter.api.condition.DisabledIfSystemProperty;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.GenericContainer;
@@ -36,6 +37,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * - Regla de CI: Falla si Docker no está activo, a menos que se invoque con -Dtest.docker.skip=true explícito.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+@ActiveProfiles("test")
 @Testcontainers
 @DisabledIfSystemProperty(named = "test.docker.skip", matches = "true", disabledReason = "Ejecución local explícita sin Docker (-Dtest.docker.skip=true)")
 @DisplayName("Defectos 4, 5, 6 y 10: Integración real de PropertySearchMapper contra PostgreSQL 16 + PostGIS + pgvector")

@@ -10,6 +10,7 @@
 -- ====================================================================================================
 
 \set ON_ERROR_STOP on
+SET client_min_messages = notice;
 
 BEGIN;
 
@@ -33,6 +34,14 @@ INSERT INTO organizacion (
     '+56911111111',
     'contacto@hogarya.cl'
 ) ON CONFLICT (id) DO NOTHING;
+
+-- Pool temporal de 500 vectores de 768 dimensiones para generación determinista de alto rendimiento
+CREATE TEMP TABLE vector_pool AS
+SELECT p AS pool_id,
+       ('[' || array_to_string(array_agg(round(((sin(p * 768 + s))::numeric), 4)), ', ') || ']')::vector(768) AS vec
+FROM generate_series(0, 499) p,
+     generate_series(1, 768) s
+GROUP BY p;
 
 -- 1. Generación sintética de 100.000 propiedades representativas del mercado chileno
 -- Integridad contra V1: columnas reales (m2_util, m2_total, direccion_referencial, comuna_id smallint)
@@ -84,11 +93,9 @@ SELECT
     ST_SetSRID(ST_MakePoint(-70.65 + (random() - 0.5) * 0.25, -33.45 + (random() - 0.5) * 0.25), 4326)::geography,
     (i % 10 = 0),
     true,
-    (
-        SELECT array_agg(round((random() * 2.0 - 1.0)::numeric, 4))::text::vector(768)
-        FROM generate_series(1, 768)
-    )
-FROM generate_series(1, 100000) AS i;
+    vp.vec
+FROM generate_series(1, 100000) AS i
+JOIN vector_pool vp ON vp.pool_id = (i % 500);
 
 COMMIT;
 
@@ -98,21 +105,25 @@ ANALYZE propiedad;
 ANALYZE estacion_metro;
 ANALYZE valor_uf;
 
+-- Extraer vector de consulta representativo del pool hacia variable psql q_vec
+SELECT vec::text AS q_vec FROM vector_pool WHERE pool_id = 0 \gset
+
 -- 3. Configuración para búsqueda vectorial con índice HNSW
 SET hnsw.ef_search = 200;
 SET work_mem = '64MB';
+SET enable_seqscan = off;
 
 -- 4. EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
 -- Búsqueda híbrida real: Filtros duros + Proximidad a Metro + Fusión RRF (Vector HNSW + GIN FTS)
 EXPLAIN (ANALYZE, BUFFERS)
 WITH top_vector AS (
-    SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> '[0.05, 0.12, -0.08, 0.44]'::vector(768)) as rank_vec
+    SELECT id, ROW_NUMBER() OVER (ORDER BY embedding <=> :'q_vec'::vector(768)) as rank_vec
     FROM propiedad
     WHERE activo = true
       AND operacion = 'VENTA'
       AND tipo_propiedad = 'DEPARTAMENTO'
       AND precio_uf BETWEEN 2000 AND 6000
-    ORDER BY embedding <=> '[0.05, 0.12, -0.08, 0.44]'::vector(768)
+    ORDER BY embedding <=> :'q_vec'::vector(768)
     LIMIT 200
 ),
 top_text AS (
@@ -152,6 +163,14 @@ LIMIT 20;
 -- ====================================================================================================
 -- Recall@10 = |Top10_HNSW ∩ Top10_Exacto| / 10.0 con ef_search=200
 -- ====================================================================================================
+CREATE TEMP TABLE IF NOT EXISTS benchmark_metrics (
+    metrica text,
+    recall numeric,
+    coincidencias text,
+    rotulo text
+);
+TRUNCATE benchmark_metrics;
+
 DO $$
 DECLARE
     v_query vector(768);
@@ -160,9 +179,7 @@ DECLARE
     v_intersection_count int;
     v_recall numeric;
 BEGIN
-    SELECT array_agg(round((random() * 2.0 - 1.0)::numeric, 4))::text::vector(768)
-    INTO v_query
-    FROM generate_series(1, 768);
+    SELECT vec INTO v_query FROM vector_pool WHERE pool_id = 0;
 
     -- 1. Búsqueda con índice HNSW habilitado y ef_search = 200
     SET LOCAL enable_seqscan = off;
@@ -196,9 +213,19 @@ BEGIN
 
     v_recall := round((v_intersection_count::numeric / 10.0), 3);
 
+    INSERT INTO benchmark_metrics (metrica, recall, coincidencias, rotulo)
+    VALUES (
+        'Recall@10',
+        v_recall,
+        v_intersection_count || '/10',
+        'FIDELIDAD DEL ÍNDICE ALGORÍTMICO (HNSW vs EXHAUSTIVO), NO CALIDAD SEMÁNTICA'
+    );
+
     RAISE NOTICE '=======================================================';
     RAISE NOTICE 'MÉTRICA DE FIDELIDAD DEL ÍNDICE (HNSW vs EXHAUSTIVO):';
     RAISE NOTICE 'Recall@10 calculado: % (Coincidencias: %/10)', v_recall, v_intersection_count;
     RAISE NOTICE 'Rotulado: FIDELIDAD DEL ÍNDICE ALGORÍTMICO, NO CALIDAD SEMÁNTICA';
     RAISE NOTICE '=======================================================';
 END $$;
+
+SELECT metrica, recall, coincidencias, rotulo FROM benchmark_metrics;

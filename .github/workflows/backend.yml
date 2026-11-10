@@ -31,3 +31,43 @@ jobs:
       - name: Execute Maven Clean Verify
         working-directory: backend
         run: mvn -B clean verify
+
+  benchmark:
+    name: Benchmark 100k & HNSW Fidelity Artifact
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build custom PostgreSQL test DB image (PostGIS + pgvector 0.8)
+        run: |
+          docker build -t hogarya-bench-db backend -f backend/Dockerfile.test-db
+
+      - name: Start PostgreSQL container
+        run: |
+          docker run -d --name pg-bench \
+            -e POSTGRES_DB=hogarya_db \
+            -e POSTGRES_USER=hogarya_app \
+            -e POSTGRES_PASSWORD=hogarya_secret \
+            -p 5432:5432 hogarya-bench-db
+          docker exec pg-bench sh -c 'until pg_isready -U hogarya_app -d hogarya_db; do sleep 1; done'
+
+      - name: Apply Flyway Migrations (V1, V2_1, V2_2, V2_3)
+        run: |
+          docker exec -i pg-bench psql -U hogarya_app -d hogarya_db < backend/src/main/resources/db/migration/V1__initial_schema.sql
+          docker exec -i pg-bench psql -U hogarya_app -d hogarya_db < backend/src/main/resources/db/migration/V2_1__seed_territorio_metro.sql
+          docker exec -i pg-bench psql -U hogarya_app -d hogarya_db < backend/src/main/resources/db/migration/V2_2__seed_uf_cmf.sql
+          docker exec -i pg-bench psql -U hogarya_app -d hogarya_db < backend/src/main/resources/db/migration/V2_3__seed_pendiente_verificar.sql
+
+      - name: Run 100k Volume Benchmark & HNSW Fidelity Analysis
+        run: |
+          docker exec -i pg-bench psql -U hogarya_app -d hogarya_db < backend/scripts/benchmark_volume_100k.sql > benchmark_results.txt 2>&1
+          cat benchmark_results.txt
+
+      - name: Upload Benchmark Results Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-100k-hnsw-results
+          path: benchmark_results.txt
+          if-no-files-found: error

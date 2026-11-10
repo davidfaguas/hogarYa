@@ -22,7 +22,7 @@ public class JwtTokenService {
     private final long expirationMinutes;
 
     public JwtTokenService(
-            @Value("${hogarya.security.jwt.secret:ClaveSecretaHogarYaChileSuperSegura2026DeAlMenos256BitsLongitudMinima}") String secret,
+            @Value("${hogarya.security.jwt.secret}") String secret,
             @Value("${hogarya.security.jwt.issuer:https://hogarya.cl}") String issuer,
             @Value("${hogarya.security.jwt.expiration-minutes:60}") long expirationMinutes
     ) {

@@ -13,7 +13,7 @@ import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-@DisplayName("Seguridad: AuthController valida contraseñas con BCrypt y emite cookies seguras")
+@DisplayName("Seguridad: AuthController valida contraseñas con BCrypt, normaliza RUT y limita intentos")
 class AuthControllerTest {
 
     private final PasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
@@ -57,6 +57,31 @@ class AuthControllerTest {
     }
 
     @Test
+    @DisplayName("Login normaliza el RUT formateado (con puntos y minúscula) usando ChileanRut.of(...)")
+    void shouldNormalizeRutIdentifierUsingChileanRut() {
+        String rawPassword = "password123!";
+        String bcryptHash = passwordEncoder.encode(rawPassword);
+
+        // El lookup busca el RUT canónico '11111112-K'
+        AuthController.UserLookup userLookup = identifier -> {
+            if ("11111112-K".equals(identifier)) {
+                return Optional.of(new AuthController.UsuarioAuth("11111112-K", "persona@hogarya.cl", bcryptHash, "ROLE_PERSONA", true));
+            }
+            return Optional.empty();
+        };
+
+        AuthController authController = AuthController.forTesting(tokenService, passwordEncoder, userLookup, true, "Strict");
+
+        // El usuario ingresa su RUT con puntos y 'k' minúscula: '11.111.112-k'
+        ResponseEntity<AuthController.AuthResponse> response = authController.login(
+                new AuthController.LoginRequest("11.111.112-k", rawPassword, null)
+        );
+
+        assertEquals(HttpStatus.OK.value(), response.getStatusCode().value());
+        assertEquals("persona@hogarya.cl", response.getBody().username());
+    }
+
+    @Test
     @DisplayName("Login con contraseña inválida contra hash BCrypt devuelve 401 SIN Set-Cookie")
     void shouldReturn401WithoutSetCookieWhenPasswordDoesNotMatchBcrypt() {
         String realPassword = "passwordReal123!";
@@ -79,7 +104,7 @@ class AuthControllerTest {
     }
 
     @Test
-    @DisplayName("Login con usuario inexistente devuelve 401 SIN Set-Cookie")
+    @DisplayName("Login con usuario inexistente ejecuta hash dummy (timing mitigation) y devuelve 401 SIN Set-Cookie")
     void shouldReturn401WithoutSetCookieWhenUserDoesNotExist() {
         AuthController.UserLookup emptyLookup = identifier -> Optional.empty();
 
@@ -91,6 +116,31 @@ class AuthControllerTest {
 
         assertEquals(HttpStatus.UNAUTHORIZED.value(), response.getStatusCode().value());
         assertNull(response.getHeaders().getFirst(HttpHeaders.SET_COOKIE), "NO debe emitir Set-Cookie para usuarios inexistentes");
+    }
+
+    @Test
+    @DisplayName("Bloqueo de intentos: tras 5 intentos fallidos devuelve 429 Too Many Requests")
+    void shouldBlockAfterMaxFailedAttempts() {
+        AuthController.UserLookup emptyLookup = identifier -> Optional.empty();
+        AuthController authController = AuthController.forTesting(tokenService, passwordEncoder, emptyLookup, true, "Strict");
+
+        String targetUser = "victima@hogarya.cl";
+
+        // Realizar 5 intentos fallidos
+        for (int i = 0; i < 5; i++) {
+            ResponseEntity<AuthController.AuthResponse> r = authController.login(
+                    new AuthController.LoginRequest(targetUser, "claveInvalida" + i, null)
+            );
+            assertEquals(HttpStatus.UNAUTHORIZED.value(), r.getStatusCode().value());
+        }
+
+        // El sexto intento debe ser rechazado con 429 TOO_MANY_REQUESTS
+        ResponseEntity<AuthController.AuthResponse> blockedResponse = authController.login(
+                new AuthController.LoginRequest(targetUser, "otraClave", null)
+        );
+
+        assertEquals(HttpStatus.TOO_MANY_REQUESTS.value(), blockedResponse.getStatusCode().value());
+        assertTrue(blockedResponse.getBody().mensaje().contains("Demasiados intentos fallidos"));
     }
 
     @Test

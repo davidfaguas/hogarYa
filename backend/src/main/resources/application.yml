@@ -4,7 +4,7 @@ spring:
   datasource:
     url: ${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5432/hogarya_db}
     username: ${SPRING_DATASOURCE_USERNAME:hogarya_app}
-    password: ${SPRING_DATASOURCE_PASSWORD:hogarya_secret}
+    password: ${SPRING_DATASOURCE_PASSWORD}
     driver-class-name: org.postgresql.Driver
   flyway:
     enabled: ${SPRING_FLYWAY_ENABLED:true}
@@ -18,11 +18,43 @@ mybatis:
 hogarya:
   security:
     jwt:
-      secret: ${HOGARYA_JWT_SECRET:ClaveSecretaHogarYaChileSuperSegura2026DeAlMenos256BitsLongitudMinima}
+      secret: ${HOGARYA_JWT_SECRET}
       issuer: https://hogarya.cl
       expiration-minutes: 60
     cookie:
-      secure: ${HOGARYA_COOKIE_SECURE:false}
+      secure: ${HOGARYA_COOKIE_SECURE:true}
       same-site: ${HOGARYA_COOKIE_SAME_SITE:Lax}
   outbox:
     interval-ms: 2000
+
+---
+# Perfil de Desarrollo Local
+spring:
+  config:
+    activate:
+      on-profile: dev
+  datasource:
+    password: ${SPRING_DATASOURCE_PASSWORD:hogarya_secret}
+
+hogarya:
+  security:
+    jwt:
+      secret: ${HOGARYA_JWT_SECRET:ClaveSecretaHogarYaChileSuperSegura2026DeAlMenos256BitsLongitudMinima}
+    cookie:
+      secure: ${HOGARYA_COOKIE_SECURE:false}
+
+---
+# Perfil de Pruebas Unitarias e Integración
+spring:
+  config:
+    activate:
+      on-profile: test
+  datasource:
+    password: ${SPRING_DATASOURCE_PASSWORD:hogarya_secret}
+
+hogarya:
+  security:
+    jwt:
+      secret: ${HOGARYA_JWT_SECRET:ClaveSecretaHogarYaChileSuperSegura2026DeAlMenos256BitsLongitudMinima}
+    cookie:
+      secure: ${HOGARYA_COOKIE_SECURE:false}
