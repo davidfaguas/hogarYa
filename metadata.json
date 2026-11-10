@@ -1,0 +1,8 @@
+{
+  "name": "Andes Habitat - Casas en venta en Chile",
+  "description": "Portal inmobiliario líder en Chile para comprar casas y departamentos. Encuentra propiedades en UF y CLP con filtros avanzados, dividendo simulado y mapa interactivo.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

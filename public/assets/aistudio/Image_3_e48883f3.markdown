@@ -1,0 +1,265 @@
+---
+name: Andes Habitat
+colors:
+  surface: '#faf8ff'
+  surface-dim: '#d2d9f4'
+  surface-bright: '#faf8ff'
+  surface-container-lowest: '#ffffff'
+  surface-container-low: '#f2f3ff'
+  surface-container: '#eaedff'
+  surface-container-high: '#e2e7ff'
+  surface-container-highest: '#dae2fd'
+  on-surface: '#131b2e'
+  on-surface-variant: '#3f4947'
+  inverse-surface: '#283044'
+  inverse-on-surface: '#eef0ff'
+  outline: '#6f7977'
+  outline-variant: '#bec9c6'
+  surface-tint: '#216962'
+  primary: '#00433e'
+  on-primary: '#ffffff'
+  primary-container: '#0d5c56'
+  on-primary-container: '#8ed2ca'
+  inverse-primary: '#8fd3cb'
+  secondary: '#b02e18'
+  on-secondary: '#ffffff'
+  secondary-container: '#fc6448'
+  on-secondary-container: '#620900'
+  tertiary: '#00442d'
+  on-tertiary: '#ffffff'
+  tertiary-container: '#005e40'
+  on-tertiary-container: '#66daa8'
+  error: '#ba1a1a'
+  on-error: '#ffffff'
+  error-container: '#ffdad6'
+  on-error-container: '#93000a'
+  primary-fixed: '#abefe7'
+  primary-fixed-dim: '#8fd3cb'
+  on-primary-fixed: '#00201d'
+  on-primary-fixed-variant: '#00504a'
+  secondary-fixed: '#ffdad3'
+  secondary-fixed-dim: '#ffb4a5'
+  on-secondary-fixed: '#3f0400'
+  on-secondary-fixed-variant: '#8e1401'
+  tertiary-fixed: '#85f8c4'
+  tertiary-fixed-dim: '#68dba9'
+  on-tertiary-fixed: '#002114'
+  on-tertiary-fixed-variant: '#005137'
+  background: '#faf8ff'
+  on-background: '#131b2e'
+  surface-variant: '#dae2fd'
+typography:
+  display-hero:
+    fontFamily: Inter
+    fontSize: 48px
+    fontWeight: '800'
+    lineHeight: 56px
+    letterSpacing: -0.02em
+  display-hero-mobile:
+    fontFamily: Inter
+    fontSize: 32px
+    fontWeight: '800'
+    lineHeight: 40px
+    letterSpacing: -0.015em
+  headline-lg:
+    fontFamily: Inter
+    fontSize: 32px
+    fontWeight: '700'
+    lineHeight: 40px
+    letterSpacing: -0.02em
+  headline-lg-mobile:
+    fontFamily: Inter
+    fontSize: 24px
+    fontWeight: '700'
+    lineHeight: 32px
+    letterSpacing: -0.01em
+  headline-md:
+    fontFamily: Inter
+    fontSize: 24px
+    fontWeight: '600'
+    lineHeight: 32px
+    letterSpacing: -0.01em
+  headline-sm:
+    fontFamily: Inter
+    fontSize: 20px
+    fontWeight: '600'
+    lineHeight: 28px
+  price-uf-lg:
+    fontFamily: Inter
+    fontSize: 26px
+    fontWeight: '800'
+    lineHeight: 32px
+    letterSpacing: -0.02em
+  price-uf-md:
+    fontFamily: Inter
+    fontSize: 20px
+    fontWeight: '700'
+    lineHeight: 26px
+    letterSpacing: -0.01em
+  price-clp:
+    fontFamily: Inter
+    fontSize: 13px
+    fontWeight: '500'
+    lineHeight: 18px
+    letterSpacing: '0'
+  body-lg:
+    fontFamily: Inter
+    fontSize: 16px
+    fontWeight: '400'
+    lineHeight: 24px
+  body-md:
+    fontFamily: Inter
+    fontSize: 14px
+    fontWeight: '400'
+    lineHeight: 20px
+  body-sm:
+    fontFamily: Inter
+    fontSize: 12px
+    fontWeight: '400'
+    lineHeight: 16px
+  label-md:
+    fontFamily: Inter
+    fontSize: 14px
+    fontWeight: '600'
+    lineHeight: 20px
+  label-sm:
+    fontFamily: Inter
+    fontSize: 12px
+    fontWeight: '600'
+    lineHeight: 16px
+    letterSpacing: 0.02em
+  badge-caption:
+    fontFamily: Inter
+    fontSize: 11px
+    fontWeight: '700'
+    lineHeight: 14px
+    letterSpacing: 0.04em
+rounded:
+  sm: 0.25rem
+  DEFAULT: 0.5rem
+  md: 0.75rem
+  lg: 1rem
+  xl: 1.5rem
+  full: 9999px
+spacing:
+  gutter: 1.5rem
+  gutter-mobile: 1rem
+  margin: 2rem
+  margin-mobile: 1rem
+  space-xs: 0.25rem
+  space-sm: 0.5rem
+  space-md: 1rem
+  space-lg: 1.5rem
+  space-xl: 2rem
+---
+
+## Brand & Style
+
+The design system establishes a premium, authoritative, yet approachable Chilean real estate experience. Built to handle complex property discovery—spanning institutional multi-family towers in Santiago, coastal retreats in Valparaíso, and parcelas in the south—the aesthetic blends editorial calm with structural rigor. 
+
+The visual style is **Contemporary Corporate Minimal with Tactile Restraint**:
+- **Trust-first Architecture**: Deep oceanic teals convey institutional security, stability, and financial capability, essential for major life investments and transactional decisions.
+- **Photo-First Focus**: Surfaces step back into neutral slate and clean light canvas tones, allowing architectural photography, natural lighting, and floor plans to command primary visual attention.
+- **High-Impact Chilean Context**: The experience is natively calibrated for Chilean financial patterns, anchoring discovery on distinct UF (`Unidad de Fomento`) metrics alongside CLP valuations.
+- **Precision & Utility**: Crisp borders, soft dual-layer elevation, and deliberate terracotta conversion anchors guide the user seamlessly through dense map-list splits, technical specification sheets, and mortgage simulations.
+
+## Colors
+
+The palette balances financial authority with decisive call-to-action triggers, adhering strictly to WCAG 2.2 AA contrast ratios (minimum 4.5:1 for body text, 3:1 for large display elements).
+
+### Core Swatches
+- **Primary Teal (`#0D5C56`)**: The institutional anchor. Applied to navigation bars, primary structural icons, active filter states, verified verification accents, and foundational branding.
+  - *Dark Teal Variant (`#083D39`)*: For hover states, high-contrast text on teal backgrounds, and header highlights.
+  - *Soft Teal Tint (`#E8F5F4`)*: Used for subtle category chips, selected table rows, active input glow fields, and property tag backgrounds.
+- **Accent Coral / Terracotta (`#E35238`)**: Reserved strictly for high-conversion action triggers—primary "Contactar Corredora", "Agendar Visita", and inquiry submissions.
+  - *Accent Hover (`#C84128`)*: Pressed and hover states for primary conversion buttons.
+- **Semantic Tertiary & Status**:
+  - *Success Emerald (`#059669`)*: Signifies confirmed reservations, mortgage pre-approvals, and "Verificada" guarantee tags.
+  - *Market Alert Amber (`#D97706`)*: Exclusively for opportunities such as "Bajó de precio", "Oportunidad de Inversión", and urgency indicators.
+- **Neutrals (Slate Architecture)**:
+  - *Ink Base (`#0F172A`)*: Headings, primary UF pricing, and maximum-contrast iconography.
+  - *Body Slate (`#334155`)*: Body copy, feature specifications, and legal copy.
+  - *Muted Slate (`#64748B`)*: Secondary CLP values, metadata (e.g., m², dorms, baños), and unselected tabs.
+  - *Border Slate (`#CBD5E1`)*: Card outlines, divider rules, and input borders.
+  - *Surface Canvas (`#F8FAFC`)* and *Surface Raised (`#FFFFFF`)*: Main page canvases and interactive card surfaces.
+
+## Typography
+
+Typography relies on **Inter** to ensure maximum digital legibility across dense data displays, filter tooltips, and map markers.
+
+### Chilean Price Hierarchy Rules
+1. **Primary UF Prominence**: All listing cards, summaries, and title zones prioritize `price-uf-lg` or `price-uf-md` using `Ink Base (#0F172A)` in bold weights (700/800). The currency prefix "UF" is always included directly preceding or adjacent to the value (e.g., **UF 4.850**).
+2. **Secondary CLP Approximation**: Displayed immediately below or beside the UF price using `price-clp` with `Muted Slate (#64748B)`. Format with period thousands separators (e.g., `~$182.450.000`), assuring full financial clarity without clutter.
+3. **Data Dense Specs**: Property metadata tokens (dorms, baños, m² útiles / totales) use `body-md` paired with medium weight icon pairings to prevent visual fatigue in repetitive card grids.
+
+## Layout & Spacing
+
+The layout is built upon a rigid 8pt baseline rhythm (`0.5rem` steps), organized to sustain dynamic search views and complex real estate browsing models.
+
+### Breakpoints & Container Logic
+- **Mobile (<768px)**: 4-column layout. Single stacked stream of property listings. Sticky bottom action bar (`height: 64px`) holds primary communication CTAs and filter drawer triggers.
+- **Tablet (768px - 1024px)**: 8-column layout. 2-column property card grid. Sticky quick-filter pills pinned below the main navigation header.
+- **Desktop (1025px - 1440px)**: 12-column split viewport:
+  - *Split Mode*: 58% scrollable property feed (2-column listings) alongside 42% fixed interactive leaflet/map canvas.
+  - *Standard Mode*: 280px left persistent filter sidebar paired with a 3-column fluid property canvas.
+- **Wide (>1440px)**: Max content container pinned to `1440px` for standard editorial pages, with full-bleed option available for map-first viewports.
+
+### Spacing Distances
+- `space-xs (4px)`: Micro-padding between badge icons and text, inline tags.
+- `space-sm (8px)`: Gaps between inline metadata chips, input icon padding.
+- `space-md (16px)`: Standard card inner padding, filter group vertical stacking.
+- `space-lg (24px)`: Layout gaps between listing cards and gallery previews.
+- `space-xl (32px)`: Section dividers, modal padding, and mortgage calculator panels.
+
+## Elevation & Depth
+
+Visual hierarchy uses a refined combination of crisp structural outlines and diffused multi-layer ambient drop shadows. Surfaces must never feel floating or detached; they remain anchored and tactile.
+
+- **Level 0 (Flat Canvas)**: `#F8FAFC`. Zero elevation. Default background for listings feeds and account dashboards.
+- **Level 1 (Card / Rest State)**: `#FFFFFF` surface with a continuous 1px outline of `#E2E8F0` and subtle depth:
+  `box-shadow: 0 1px 3px 0 rgba(15, 23, 42, 0.05), 0 1px 2px -1px rgba(15, 23, 42, 0.05);`
+- **Level 2 (Hover & Active Listings)**: Triggered when hovering over card listings and map pins:
+  `box-shadow: 0 10px 15px -3px rgba(13, 92, 86, 0.08), 0 4px 6px -4px rgba(15, 23, 42, 0.04);`
+  The primary teal tint in the shadow subtly elevates the property.
+- **Level 3 (Sticky Headers & Filter Toolbars)**: Solid surface with high backdrop blur (`backdrop-filter: blur(12px)`) when semi-transparent:
+  `box-shadow: 0 4px 12px 0 rgba(15, 23, 42, 0.06);`
+- **Level 4 (Modals, Lead Contact Drawers, Full-screen Gallery)**:
+  `box-shadow: 0 20px 25px -5px rgba(15, 23, 42, 0.12), 0 8px 10px -6px rgba(15, 23, 42, 0.08);`
+
+## Shapes
+
+The design uses **Roundedness Level 2** to strike a balance between welcoming residential aesthetics and financial credibility:
+- Standard control elements (inputs, standard buttons, dropdown menus) adopt `0.5rem (8px)` corner radius.
+- Property cards, modal windows, and map preview tooltips utilize `rounded-lg` (`1rem` / `12-16px`) for clean media framing.
+- Status badges, price callout chips, and photo count counters apply pill shaping (`9999px`) to separate them from angular layout lines.
+
+## Components
+
+### Buttons & Interactive Triggers
+- **Primary CTA ("Contactar", "Agendar Visita")**: Solid Terracotta Coral (`#E35238`), text white (`#FFFFFF`), `font-weight: 600`, minimum height `48px` to satisfy touch standards. On hover, background transitions to `#C84128`. Focus ring: 2px solid `#E35238` with 2px offset.
+- **Secondary Action ("Simular Crédito", "Guardar")**: Border 1.5px solid `#0D5C56`, text `#0D5C56`, background transparent. Hover: `#E8F5F4`.
+- **Tertiary / Utility**: Ghost styling with `#334155` text, background transparent. Hover: `#F1F5F9`.
+
+### Real Estate Property Badges
+Mounted over the top-left or top-right of property images with backdrop protection:
+- **"Nueva"**: Deep Teal (`#0D5C56`) background, text white.
+- **"Tour virtual"**: Frosted slate glass (`rgba(15, 23, 42, 0.75)` with blur), text white, paired with 360° rotational icon.
+- **"Verificada"**: Emerald Green (`#059669`) background or tint with white/dark green text and a checkmark shield icon.
+- **"Bajó de precio"**: Amber (`#D97706`) background, text white, paired with downward metric indicator.
+
+### Property Cards
+- **Image Aspect**: 16:10 ratio, equipped with lazy-loaded carousel dot navigation and a quick-save floating heart button in the top-right corner.
+- **Card Content Structure**:
+  1. Top metadata line: Property category (e.g., *Departamento en Venta*) and Comuna / Barrio (*Las Condes, Santiago*).
+  2. Pricing block: UF in `price-uf-lg` bold, adjacent or sub-level CLP price.
+  3. Metric strip: Standard icon row separated by dividers: `Dormitorios` • `Baños` • `m² útiles`.
+  4. Footer snippet: Corredora or Inmobiliaria identity badge with rapid WhatsApp/Contact link.
+
+### Inputs & Search Bars
+- **Height**: Minimum `44px` on desktop, `48px` on mobile screens.
+- **Search Header**: Segmented search container featuring three distinct dropdown slots: Comuna/Región, Operación (Venta/Arriendo), and Tipo de Propiedad (Casa, Depto, Parcela), terminating in an Accent Coral search button.
+- **Field States**: Default border `#CBD5E1`. On focus: Border `#0D5C56` with an outer ring of `rgba(13, 92, 86, 0.15)`.
+
+### Filter Chips & Map Markers
+- **Filter Chips**: Pill shape, background `#FFFFFF`, border 1px solid `#CBD5E1`, text `#334155`. When active: Background `#0D5C56`, text `#FFFFFF`, border-color `#0D5C56`.
+- **Map Price Pins**: Pill containers rendering UF amounts (e.g., "4.200 UF"). Default state: `#FFFFFF` fill with `#0F172A` text and subtle shadow. Hover / Active: `#0D5C56` fill with `#FFFFFF` text. Viewed/Visited: `#64748B` fill.
