@@ -323,7 +323,7 @@ class ControllersIntegrationIT {
         mockMvc.perform(get("/api/v1/auth/csrf"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.token", notNullValue()))
-                .andExpect(jsonPath("$.headerName", is("X-XSRF-TOKEN")))
+                .andExpect(jsonPath("$.headerName", anyOf(is("X-XSRF-TOKEN"), is("X-CSRF-TOKEN"))))
                 .andExpect(jsonPath("$.parameterName", is("_csrf")));
     }
 

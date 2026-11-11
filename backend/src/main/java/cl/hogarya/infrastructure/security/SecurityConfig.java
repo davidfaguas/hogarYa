@@ -77,6 +77,7 @@ public class SecurityConfig {
         requestHandler.setCsrfRequestAttributeName(null);
 
         CookieCsrfTokenRepository csrfRepository = CookieCsrfTokenRepository.withHttpOnlyFalse();
+        csrfRepository.setHeaderName("X-XSRF-TOKEN");
         csrfRepository.setCookieCustomizer(customizer -> customizer
                 .sameSite(cookieSameSite)
                 .secure(cookieSecure)
