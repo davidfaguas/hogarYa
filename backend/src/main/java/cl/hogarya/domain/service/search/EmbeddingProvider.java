@@ -21,6 +21,17 @@ public interface EmbeddingProvider {
     float[] generateEmbedding(String text);
 
     /**
+     * Genera un embedding vectorial especificando el tipo de tarea (consulta o documento).
+     *
+     * @param text Texto a vectorizar
+     * @param taskType Tipo de tarea según modelo (RETRIEVAL_QUERY o RETRIEVAL_DOCUMENT)
+     * @return Vector de flotantes normalizado L2
+     */
+    default float[] generateEmbedding(String text, GeminiEmbeddingProvider.TaskType taskType) {
+        return generateEmbedding(text);
+    }
+
+    /**
      * Dimensión fija del espacio vectorial (768 para compatibilidad con esquema pgvector).
      *
      * @return Número de dimensiones del vector
