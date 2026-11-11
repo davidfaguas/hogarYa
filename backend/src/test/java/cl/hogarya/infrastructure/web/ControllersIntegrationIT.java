@@ -21,6 +21,9 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
 import jakarta.servlet.http.Cookie;
+import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.List;
 import java.util.UUID;
@@ -248,5 +251,103 @@ class ControllersIntegrationIT {
                         .header("Origin", "http://evil-attacker.com")
                         .header("Access-Control-Request-Method", "GET"))
                 .andExpect(status().isForbidden());
+    }
+
+    @Test
+    @DisplayName("Auth: GET /api/v1/auth/csrf retorna token CSRF en el cuerpo JSON para topologías cross-site")
+    void shouldProvideCsrfTokenInResponseBody() throws Exception {
+        mockMvc.perform(get("/api/v1/auth/csrf"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.token", notNullValue()))
+                .andExpect(jsonPath("$.headerName", is("X-XSRF-TOKEN")))
+                .andExpect(jsonPath("$.parameterName", is("_csrf")));
+    }
+
+    @Test
+    @DisplayName("Auth: GET /api/v1/auth/me protegido (401 sin sesión, 200 con sesión activa y perfil)")
+    void shouldReturnCurrentUserProfileWhenAuthenticated() throws Exception {
+        // Sin autenticación debe retornar 401 Unauthorized
+        mockMvc.perform(get("/api/v1/auth/me"))
+                .andExpect(status().isUnauthorized());
+
+        // Con cookie de sesión válida debe retornar el perfil del usuario autenticado
+        mockMvc.perform(get("/api/v1/auth/me").cookie(authCookie))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.username", is("usuario.test@hogarya.cl")))
+                .andExpect(jsonPath("$.rut", is("12345678-5")))
+                .andExpect(jsonPath("$.roles[0]", is("ROLE_PERSONA")))
+                .andExpect(jsonPath("$.autenticado", is(true)));
+    }
+
+    @Test
+    @DisplayName("Propiedades: POST /api/v1/propiedades publica propiedad con CSRF y dispara indexación")
+    void shouldPublishNewPropertyWithAuthAndCsrf() throws Exception {
+        String publishJson = """
+                {
+                    "titulo": "Departamento de Lujo en Vitacura con vista al Club de Polo",
+                    "descripcion": "Exclusivo penthouse con finas terminaciones, terraza panorámica y piscina privada",
+                    "tipoPropiedad": "DEPARTAMENTO",
+                    "operacion": "VENTA",
+                    "precioUf": 12500.00,
+                    "m2Util": 180.0,
+                    "m2Total": 220.0,
+                    "dormitorios": 3,
+                    "banos": 3,
+                    "comunaId": 1,
+                    "direccionReferencial": "Av. Vitacura 5000",
+                    "barrio": "Vitacura",
+                    "latitud": -33.4050,
+                    "longitud": -70.5850,
+                    "subsidioDs19": false,
+                    "subsidioDs1": false
+                }
+                """;
+
+        // 1. Sin CSRF debe ser rechazado con 403
+        mockMvc.perform(post("/api/v1/propiedades")
+                        .cookie(authCookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(publishJson))
+                .andExpect(status().isForbidden());
+
+        // 2. Con CSRF y Auth debe responder 201 Created y retornar ID
+        mockMvc.perform(post("/api/v1/propiedades")
+                        .with(csrf())
+                        .cookie(authCookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(publishJson))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.id", notNullValue()))
+                .andExpect(jsonPath("$.codigoPublicacion", startsWith("PROP-")))
+                .andExpect(jsonPath("$.mensaje", containsString("publicada e indexación")));
+    }
+
+    @Test
+    @DisplayName("Actuator: Métricas protegidas de indexación (401/403 sin auth, 200 con auth)")
+    void shouldProtectActuatorMetricsAndExposeIndexingCounters() throws Exception {
+        // Sin autenticación debe ser rechazado
+        mockMvc.perform(get("/actuator/metrics/hogarya.indexing.indexed.count"))
+                .andExpect(status().isUnauthorized());
+
+        // Con autenticación debe retornar la métrica registrada en Micrometer
+        mockMvc.perform(get("/actuator/metrics/hogarya.indexing.indexed.count").cookie(authCookie))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.name", is("hogarya.indexing.indexed.count")));
+    }
+
+    @Test
+    @DisplayName("OpenAPI: Exportar especificación /v3/api-docs a target/openapi.json como artefacto de CI")
+    void shouldExportOpenApiSpec() throws Exception {
+        byte[] openApiJson = mockMvc.perform(get("/v3/api-docs"))
+                .andExpect(status().isOk())
+                .andReturn()
+                .getResponse()
+                .getContentAsByteArray();
+
+        File targetDir = new File("target");
+        if (!targetDir.exists()) {
+            targetDir.mkdirs();
+        }
+        Files.write(Path.of("target", "openapi.json"), openApiJson);
     }
 }

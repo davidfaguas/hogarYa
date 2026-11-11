@@ -1,9 +1,13 @@
 package cl.hogarya.domain.service.search;
 
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.scheduling.annotation.Async;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.HttpStatusCodeException;
@@ -12,13 +16,14 @@ import org.springframework.web.client.RestClientResponseException;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Servicio de Indexación Semántica Vectorial de Propiedades.
  * - Genera embeddings densos de 768 dimensiones utilizando TaskType.RETRIEVAL_DOCUMENT al publicar o actualizar.
- * - Provee job de relleno (backfill) para propiedades sin vectorizar en la base de datos.
- * - Monitorea y registra métricas de indexación exitosa, fallos generales y errores HTTP 429 (Rate Limit / Quota Exceeded).
+ * - Provee job asíncrono con reintentos para publicaciones y @Scheduled con control de tasa para relleno (backfill).
+ * - Registra indexedCount, failureCount y rateLimit429Count en AtomicLong y en Micrometer MeterRegistry.
  */
 @Service
 public class PropertyIndexingService {
@@ -32,19 +37,47 @@ public class PropertyIndexingService {
     private final AtomicLong failureCount = new AtomicLong(0);
     private final AtomicLong rateLimit429Count = new AtomicLong(0);
 
+    private final Counter indexedCounter;
+    private final Counter failureCounter;
+    private final Counter rateLimit429Counter;
+
     public record IndexingMetrics(
             long indexedCount,
             long failureCount,
             long rateLimit429Count
     ) {}
 
+    public PropertyIndexingService(
+            EmbeddingProvider embeddingProvider,
+            JdbcClient jdbcClient
+    ) {
+        this(embeddingProvider, jdbcClient, null);
+    }
+
     @Autowired
     public PropertyIndexingService(
             @Autowired(required = false) EmbeddingProvider embeddingProvider,
-            JdbcClient jdbcClient
+            JdbcClient jdbcClient,
+            @Autowired(required = false) MeterRegistry meterRegistry
     ) {
         this.embeddingProvider = embeddingProvider;
         this.jdbcClient = jdbcClient;
+
+        if (meterRegistry != null) {
+            this.indexedCounter = Counter.builder("hogarya.indexing.indexed.count")
+                    .description("Cantidad total de propiedades indexadas exitosamente con embedding")
+                    .register(meterRegistry);
+            this.failureCounter = Counter.builder("hogarya.indexing.failure.count")
+                    .description("Cantidad total de fallos irrecuperables de indexación")
+                    .register(meterRegistry);
+            this.rateLimit429Counter = Counter.builder("hogarya.indexing.ratelimit.429.count")
+                    .description("Cantidad de errores HTTP 429 Rate Limit / Quota Exceeded")
+                    .register(meterRegistry);
+        } else {
+            this.indexedCounter = null;
+            this.failureCounter = null;
+            this.rateLimit429Counter = null;
+        }
     }
 
     /**
@@ -57,7 +90,7 @@ public class PropertyIndexingService {
     public boolean indexProperty(UUID propertyId) {
         if (embeddingProvider == null) {
             log.warn("No se puede indexar la propiedad {}: No hay un EmbeddingProvider configurado.", propertyId);
-            failureCount.incrementAndGet();
+            recordFailure();
             return false;
         }
 
@@ -78,7 +111,7 @@ public class PropertyIndexingService {
 
             if (row == null) {
                 log.warn("Propiedad {} no encontrada para indexación", propertyId);
-                failureCount.incrementAndGet();
+                recordFailure();
                 return false;
             }
 
@@ -114,11 +147,11 @@ public class PropertyIndexingService {
                     .update();
 
             if (updated > 0) {
-                indexedCount.incrementAndGet();
+                recordSuccess();
                 log.info("Propiedad {} indexada exitosamente con RETRIEVAL_DOCUMENT (dim={})", propertyId, vector.length);
                 return true;
             } else {
-                failureCount.incrementAndGet();
+                recordFailure();
                 return false;
             }
 
@@ -126,6 +159,42 @@ public class PropertyIndexingService {
             handleIndexingException(propertyId, ex);
             return false;
         }
+    }
+
+    /**
+     * Indexación asíncrona con reintentos exponenciales para el flujo de publicación.
+     */
+    @Async
+    public CompletableFuture<Boolean> indexPropertyAsync(UUID propertyId) {
+        int maxRetries = 3;
+        long backoffMs = 500;
+        for (int attempt = 1; attempt <= maxRetries; attempt++) {
+            boolean success = indexProperty(propertyId);
+            if (success) {
+                return CompletableFuture.completedFuture(true);
+            }
+            if (attempt < maxRetries) {
+                try {
+                    Thread.sleep(backoffMs * attempt);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+        }
+        log.warn("Agotados los {} reintentos de indexación asíncrona para la propiedad {}", maxRetries, propertyId);
+        return CompletableFuture.completedFuture(false);
+    }
+
+    /**
+     * Job programado de relleno (backfill) para propiedades pendientes de embedding con límite de velocidad.
+     */
+    @Scheduled(
+            initialDelayString = "${hogarya.indexing.backfill.initial-delay-ms:15000}",
+            fixedDelayString = "${hogarya.indexing.backfill.interval-ms:60000}"
+    )
+    public void scheduledBackfill() {
+        backfillMissingEmbeddings(20);
     }
 
     /**
@@ -160,6 +229,13 @@ public class PropertyIndexingService {
             if (ok) {
                 successCount++;
             }
+            try {
+                // Control de velocidad preventiva para no saturar TPS de Gemini
+                Thread.sleep(100);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                break;
+            }
         }
 
         log.info("Backfill completado: {}/{} propiedades indexadas con éxito", successCount, missingIds.size());
@@ -175,6 +251,27 @@ public class PropertyIndexingService {
                 failureCount.get(),
                 rateLimit429Count.get()
         );
+    }
+
+    private void recordSuccess() {
+        indexedCount.incrementAndGet();
+        if (indexedCounter != null) {
+            indexedCounter.increment();
+        }
+    }
+
+    private void recordFailure() {
+        failureCount.incrementAndGet();
+        if (failureCounter != null) {
+            failureCounter.increment();
+        }
+    }
+
+    private void record429() {
+        rateLimit429Count.incrementAndGet();
+        if (rateLimit429Counter != null) {
+            rateLimit429Counter.increment();
+        }
     }
 
     private String buildCanonicalDocumentText(String titulo, String tipo, String operacion, String comuna, String barrio, String descripcion) {
@@ -205,7 +302,7 @@ public class PropertyIndexingService {
     }
 
     private void handleIndexingException(UUID propertyId, Exception ex) {
-        failureCount.incrementAndGet();
+        recordFailure();
 
         boolean is429 = false;
         if (ex instanceof HttpStatusCodeException hsce && hsce.getStatusCode().value() == 429) {
@@ -217,7 +314,7 @@ public class PropertyIndexingService {
         }
 
         if (is429) {
-            rateLimit429Count.incrementAndGet();
+            record429();
             log.error("RATE LIMIT 429 excedido al indexar propiedad {}: {}", propertyId, ex.getMessage());
         } else {
             log.error("Error al indexar semánticamente la propiedad {}: {}", propertyId, ex.getMessage(), ex);

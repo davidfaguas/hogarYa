@@ -1,5 +1,7 @@
 package cl.hogarya.domain.service.search;
 
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -112,5 +114,41 @@ class PropertyIndexingServiceTest {
         assertEquals(0, metrics.indexedCount());
         assertEquals(1, metrics.failureCount());
         assertEquals(1, metrics.rateLimit429Count(), "Debe incrementar el contador específico de 429");
+    }
+
+    @Test
+    @DisplayName("Micrometer: Registra e incrementa métricas en MeterRegistry")
+    void shouldRegisterAndIncrementMicrometerCounters() {
+        MeterRegistry registry = new SimpleMeterRegistry();
+        PropertyIndexingService serviceWithMeter = new PropertyIndexingService(mockEmbeddingProvider, mockJdbcClient, registry);
+
+        UUID propId = UUID.randomUUID();
+        Map<String, Object> row = Map.of(
+                "titulo", "Departamento Vitacura",
+                "tipo_propiedad", "DEPARTAMENTO",
+                "operacion", "VENTA"
+        );
+
+        when(mockJdbcClient.sql(contains("FROM propiedad p"))
+                .param("id", propId)
+                .query(any(org.springframework.jdbc.core.ColumnMapRowMapper.class))
+                .optional())
+                .thenReturn(Optional.of(row));
+
+        float[] mockVec = new float[768];
+        when(mockEmbeddingProvider.generateEmbedding(anyString(), any())).thenReturn(mockVec);
+
+        when(mockJdbcClient.sql(contains("UPDATE propiedad"))
+                .param(eq("vec"), anyString())
+                .param(eq("id"), eq(propId))
+                .update())
+                .thenReturn(1);
+
+        boolean success = serviceWithMeter.indexProperty(propId);
+        assertTrue(success);
+
+        assertEquals(1.0, registry.get("hogarya.indexing.indexed.count").counter().count());
+        assertEquals(0.0, registry.get("hogarya.indexing.failure.count").counter().count());
+        assertEquals(0.0, registry.get("hogarya.indexing.ratelimit.429.count").counter().count());
     }
 }

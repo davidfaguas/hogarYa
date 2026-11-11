@@ -825,3 +825,99 @@ END $$;
 \echo 'TABLA DE MÉTRICA DE FIDELIDAD (RECALL@10)'
 \echo '===================================================================================================='
 SELECT metrica, recall, coincidencias, rotulo FROM benchmark_metrics;
+
+-- ====================================================================================================
+-- 7. EVALUACIÓN DE IMPACTO DE ÍNDICE B EN ESCRITURAS (INSERT 1.000 FILAS)
+--    SLA ADOPTADO: p95 < 100 ms en GET /api/v1/propiedades a 100k filas
+-- ====================================================================================================
+CREATE TEMP TABLE IF NOT EXISTS impacto_escritura_indice_b (
+    metrica text,
+    filas_insertadas int,
+    duracion_sin_indice_b text,
+    duracion_con_indice_b text,
+    diferencia_ms text,
+    overhead_porcentual text,
+    conclusion text
+);
+TRUNCATE impacto_escritura_indice_b;
+
+DO $$
+DECLARE
+    t_start timestamptz;
+    t_end timestamptz;
+    ms_sin numeric;
+    ms_con numeric;
+    diff_ms numeric;
+    overhead numeric;
+BEGIN
+    -- 1. Medir inserción de 1.000 filas SIN Índice B
+    DROP INDEX IF EXISTS idx_propiedad_comuna_op_tipo_precio;
+
+    t_start := clock_timestamp();
+    INSERT INTO propiedad (
+        id, codigo_publicacion, organizacion_id, titulo, descripcion,
+        tipo_propiedad, operacion, estado, precio_uf,
+        m2_util, m2_total, dormitorios, banos, comuna_id,
+        direccion_referencial, barrio, ubicacion, activo
+    )
+    SELECT
+        gen_random_uuid(),
+        'WRITE-NO-B-' || lpad(i::text, 4, '0'),
+        '00000000-0000-0000-0000-000000000001'::uuid,
+        'Propiedad Test Escritura ' || i,
+        'Descripción de prueba de rendimiento de inserción sin indice B',
+        'DEPARTAMENTO', 'VENTA', 'NUEVA', 3500.00 + (i % 500),
+        60.0, 70.0, 2, 2, 1,
+        'Av. Test 123', 'Providencia',
+        ST_SetSRID(ST_MakePoint(-70.6100, -33.4250), 4326)::geography,
+        TRUE
+    FROM generate_series(1, 1000) i;
+    t_end := clock_timestamp();
+    ms_sin := round(EXTRACT(EPOCH FROM (t_end - t_start)) * 1000.0, 2);
+
+    -- 2. Crear Índice B
+    CREATE INDEX idx_propiedad_comuna_op_tipo_precio 
+    ON propiedad (comuna_id, operacion, tipo_propiedad, precio_uf) 
+    WHERE activo = TRUE;
+
+    -- 3. Medir inserción de 1.000 filas CON Índice B
+    t_start := clock_timestamp();
+    INSERT INTO propiedad (
+        id, codigo_publicacion, organizacion_id, titulo, descripcion,
+        tipo_propiedad, operacion, estado, precio_uf,
+        m2_util, m2_total, dormitorios, banos, comuna_id,
+        direccion_referencial, barrio, ubicacion, activo
+    )
+    SELECT
+        gen_random_uuid(),
+        'WRITE-WITH-B-' || lpad(i::text, 4, '0'),
+        '00000000-0000-0000-0000-000000000001'::uuid,
+        'Propiedad Test Escritura B ' || i,
+        'Descripción de prueba de rendimiento de inserción con indice B',
+        'DEPARTAMENTO', 'VENTA', 'NUEVA', 3500.00 + (i % 500),
+        60.0, 70.0, 2, 2, 1,
+        'Av. Test 123', 'Providencia',
+        ST_SetSRID(ST_MakePoint(-70.6100, -33.4250), 4326)::geography,
+        TRUE
+    FROM generate_series(1, 1000) i;
+    t_end := clock_timestamp();
+    ms_con := round(EXTRACT(EPOCH FROM (t_end - t_start)) * 1000.0, 2);
+
+    diff_ms := ms_con - ms_sin;
+    overhead := round(((ms_con - ms_sin) / NULLIF(ms_sin, 0)) * 100.0, 2);
+
+    INSERT INTO impacto_escritura_indice_b VALUES (
+        'INSERT 1.000 propiedades',
+        1000,
+        ms_sin || ' ms',
+        ms_con || ' ms',
+        diff_ms || ' ms',
+        overhead || ' %',
+        CASE WHEN overhead <= 8.0 THEN 'SE MANTIENE: Overhead mínimo en inserciones masivas con ganancia de 3,5 ms en lectura' ELSE 'EVALUAR DESCARTE' END
+    );
+END $$;
+
+\echo '===================================================================================================='
+\echo 'IMPACTO DE ÍNDICE B EN ESCRITURAS (INSERT 1.000 FILAS)'
+\echo '===================================================================================================='
+SELECT * FROM impacto_escritura_indice_b;

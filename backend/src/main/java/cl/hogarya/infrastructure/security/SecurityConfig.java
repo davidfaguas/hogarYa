@@ -68,7 +68,7 @@ public class SecurityConfig {
                 .ignoringRequestMatchers(
                     // Endpoints públicos o sin sesión previa exentos de CSRF
                     "/api/v1/auth/**",
-                    "/api/v1/propiedades/**",
+                    "/api/v1/propiedades/busqueda",
                     "/api/v1/finanzas/**",
                     "/api/v1/simulador",
                     "/api/v1/subsidios/**",
@@ -91,11 +91,12 @@ public class SecurityConfig {
                 .requestMatchers(HttpMethod.POST, "/api/v1/leads").permitAll()
                 // Auth endpoints públicos
                 .requestMatchers(HttpMethod.POST, "/api/v1/auth/login", "/api/v1/auth/registro", "/api/v1/auth/logout").permitAll()
+                .requestMatchers(HttpMethod.GET, "/api/v1/auth/csrf").permitAll()
                 // Swagger OpenAPI
                 .requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
-                // Actuator y salud
+                // Actuator y salud básica
                 .requestMatchers("/actuator/health", "/actuator/info").permitAll()
-                // Cualquier otra solicitud (ej. POST/DELETE /api/v1/favoritos) requiere autenticación
+                // Cualquier otra solicitud (ej. GET /api/v1/auth/me, POST /api/v1/propiedades, POST/DELETE /api/v1/favoritos, /actuator/metrics/**) requiere autenticación
                 .anyRequest().authenticated()
             )
             .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class)

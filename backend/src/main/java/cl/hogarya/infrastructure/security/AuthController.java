@@ -16,7 +16,11 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseCookie;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.security.authentication.AnonymousAuthenticationToken;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.web.csrf.CsrfToken;
 import org.springframework.web.bind.annotation.*;
 
 import java.net.InetAddress;
@@ -281,6 +285,60 @@ public class AuthController {
         return ResponseEntity.ok()
                 .header(HttpHeaders.SET_COOKIE, cookie.toString())
                 .body(new AuthResponse(null, "Sesión cerrada exitosamente"));
+    }
+
+    public record CsrfResponse(
+            @Schema(description = "Token CSRF criptográfico") String token,
+            @Schema(description = "Nombre de la cabecera HTTP esperada", example = "X-XSRF-TOKEN") String headerName,
+            @Schema(description = "Nombre del parámetro esperado", example = "_csrf") String parameterName
+    ) {}
+
+    public record UserProfileResponse(
+            @Schema(description = "Email o identificador principal del usuario", example = "usuario@hogarya.cl") String username,
+            @Schema(description = "RUT chileno normalizado del usuario", example = "12345678-5") String rut,
+            @Schema(description = "Roles o permisos asignados", example = "[\"ROLE_PERSONA\"]") List<String> roles,
+            @Schema(description = "Indica si la sesión se encuentra autenticada", example = "true") boolean autenticado
+    ) {}
+
+    @GetMapping("/csrf")
+    @Operation(summary = "Obtener token CSRF", description = "Entrega el token CSRF actual en el cuerpo JSON de la respuesta para clientes SPA / Cross-Site")
+    @ApiResponse(responseCode = "200", description = "Token CSRF entregado correctamente",
+            content = @Content(schema = @Schema(implementation = CsrfResponse.class)))
+    public ResponseEntity<CsrfResponse> getCsrf(HttpServletRequest request) {
+        CsrfToken token = (CsrfToken) request.getAttribute(CsrfToken.class.getName());
+        if (token == null) {
+            return ResponseEntity.ok(new CsrfResponse("", "X-XSRF-TOKEN", "_csrf"));
+        }
+        return ResponseEntity.ok(new CsrfResponse(token.getToken(), token.getHeaderName(), token.getParameterName()));
+    }
+
+    @GetMapping("/me")
+    @Operation(summary = "Perfil de sesión del usuario actual", description = "Retorna la información del usuario autenticado a partir de la sesión JWT")
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "Usuario autenticado",
+                    content = @Content(schema = @Schema(implementation = UserProfileResponse.class))),
+            @ApiResponse(responseCode = "401", description = "No autenticado o sesión inválida")
+    })
+    public ResponseEntity<UserProfileResponse> getCurrentUser(Authentication authentication) {
+        if (authentication == null || !authentication.isAuthenticated()
+                || authentication instanceof AnonymousAuthenticationToken) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
+
+        String username = authentication.getName();
+        List<String> roles = authentication.getAuthorities().stream()
+                .map(GrantedAuthority::getAuthority)
+                .toList();
+
+        String rut = null;
+        if (authentication.getDetails() instanceof Map<?, ?> details) {
+            Object rutObj = details.get("rut");
+            if (rutObj != null) {
+                rut = rutObj.toString();
+            }
+        }
+
+        return ResponseEntity.ok(new UserProfileResponse(username, rut, roles, true));
     }
 
     public String resolveClientIp(HttpServletRequest request) {
