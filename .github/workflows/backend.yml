@@ -66,11 +66,14 @@ jobs:
       - name: Run 100k Volume Benchmark & HNSW Fidelity Analysis
         run: |
           docker exec -i pg-bench psql -U hogarya_app -d hogarya_db < backend/scripts/benchmark_volume_100k.sql > benchmark_results.txt 2>&1
+          docker cp pg-bench:/tmp/benchmark_plans_raw.txt ./benchmark_plans_raw.txt || touch ./benchmark_plans_raw.txt
           cat benchmark_results.txt
 
       - name: Upload Benchmark Results Artifact
         uses: actions/upload-artifact@v4
         with:
           name: benchmark-100k-hnsw-results
-          path: benchmark_results.txt
+          path: |
+            benchmark_results.txt
+            benchmark_plans_raw.txt
           if-no-files-found: error

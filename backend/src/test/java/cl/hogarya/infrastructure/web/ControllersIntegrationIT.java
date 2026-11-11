@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.UUID;
 
 import static org.hamcrest.Matchers.*;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -180,9 +181,8 @@ class ControllersIntegrationIT {
     }
 
     @Test
-    @DisplayName("FavoritesController: Ciclo completo sobre tabla 'favorito' (Flyway V2_4): POST, GET y DELETE")
+    @DisplayName("FavoritesController: Ciclo completo sobre tabla 'favorito' (Flyway V2_4) con protección CSRF")
     void shouldManageFavoritesLifecycle() throws Exception {
-        // 1. Agregar a favoritos (POST)
         String addJson = """
                 {
                     "propiedadId": "%s",
@@ -190,14 +190,23 @@ class ControllersIntegrationIT {
                 }
                 """.formatted(testPropId);
 
+        // 1. Mutación POST sin token CSRF debe ser rechazada con 403 Forbidden
         mockMvc.perform(post("/api/v1/favoritos")
+                        .cookie(authCookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(addJson))
+                .andExpect(status().isForbidden());
+
+        // 2. Mutación POST con token CSRF válido debe retornar 201 Created
+        mockMvc.perform(post("/api/v1/favoritos")
+                        .with(csrf())
                         .cookie(authCookie)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(addJson))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.mensaje", containsString("guardada en favoritos")));
 
-        // 2. Listar favoritos (GET)
+        // 3. Listar favoritos (GET seguro, no requiere CSRF)
         mockMvc.perform(get("/api/v1/favoritos").cookie(authCookie))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$", hasSize(greaterThanOrEqualTo(1))))
@@ -205,13 +214,39 @@ class ControllersIntegrationIT {
                 .andExpect(jsonPath("$[0].codigo_publicacion", is("WEB-PROP-1")))
                 .andExpect(jsonPath("$[0].notas", is("Excelente ubicación y precio")));
 
-        // 3. Eliminar de favoritos (DELETE)
+        // 4. Mutación DELETE sin token CSRF debe ser rechazada con 403 Forbidden
         mockMvc.perform(delete("/api/v1/favoritos/" + testPropId).cookie(authCookie))
+                .andExpect(status().isForbidden());
+
+        // 5. Mutación DELETE con token CSRF válido debe retornar 204 No Content
+        mockMvc.perform(delete("/api/v1/favoritos/" + testPropId)
+                        .with(csrf())
+                        .cookie(authCookie))
                 .andExpect(status().isNoContent());
 
-        // 4. Verificar que la lista ya no contiene la propiedad
+        // 6. Verificar que la lista ya no contiene la propiedad
         mockMvc.perform(get("/api/v1/favoritos").cookie(authCookie))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[?(@.propiedad_id == '%s')]".formatted(testPropId), empty()));
+    }
+
+    @Test
+    @DisplayName("CORS: Origen exacto autorizado recibe cabeceras Access-Control-Allow-Origin y Credentials")
+    void shouldHandleCorsForAuthorizedOrigin() throws Exception {
+        mockMvc.perform(options("/api/v1/propiedades")
+                        .header("Origin", "http://localhost:3000")
+                        .header("Access-Control-Request-Method", "GET"))
+                .andExpect(status().isOk())
+                .andExpect(header().string("Access-Control-Allow-Origin", "http://localhost:3000"))
+                .andExpect(header().string("Access-Control-Allow-Credentials", "true"));
+    }
+
+    @Test
+    @DisplayName("CORS: Origen no autorizado es rechazado con 403 Forbidden")
+    void shouldRejectCorsForDisallowedOrigin() throws Exception {
+        mockMvc.perform(options("/api/v1/propiedades")
+                        .header("Origin", "http://evil-attacker.com")
+                        .header("Access-Control-Request-Method", "GET"))
+                .andExpect(status().isForbidden());
     }
 }

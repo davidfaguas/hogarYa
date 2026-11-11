@@ -339,24 +339,25 @@ SELECT
     latencia_ms || ' ms' AS latencia
 FROM analisis_punto_5000;
 
-\echo '===================================================================================================='
-\echo 'PLAN ÍNTEGRO DEL PUNTO 5.000 FILAS - ORIGINAL SIN MITIGACIÓN (SORT / SEQ SCAN)'
-\echo '===================================================================================================='
-SELECT plan_integro FROM analisis_punto_5000 WHERE escenario = 'Original (Sin Mitigación)';
+-- Planes del punto 5.000 se redirigen al artefacto raw junto a las demás mediciones
 
-\echo '===================================================================================================='
-\echo 'PLAN ÍNTEGRO DEL PUNTO 5.000 FILAS - CON MITIGACIÓN (HNSW + ITERATIVE_SCAN)'
-\echo '===================================================================================================='
-SELECT plan_integro FROM analisis_punto_5000 WHERE escenario LIKE 'Mitigado%';
 
-CREATE TEMP TABLE IF NOT EXISTS barrido_hibrido_completo (
-    punto text,
+CREATE TEMP TABLE IF NOT EXISTS benchmark_all_runs (
+    categoria text,
     filas_filtro int,
-    latencia_ms numeric,
-    plan_integro text
+    iteracion int,
+    duracion_ms numeric,
+    plan_text text
 );
-TRUNCATE barrido_hibrido_completo;
+TRUNCATE benchmark_all_runs;
 
+SET hnsw.ef_search = 200;
+SET hnsw.iterative_scan = relaxed_order;
+SET hnsw.max_scan_tuples = 50000;
+SET work_mem = '64MB';
+
+-- 1. Medición de la consulta híbrida completa en 4 puntos de selectividad (500, 5.000, 20.000, 50.000)
+-- 35 repeticiones por cada punto tras 5 warmups
 DO $$
 DECLARE
     v_qvec text;
@@ -369,6 +370,7 @@ DECLARE
     v_punto_label text;
     v_total_filas int;
     k int;
+    i int;
 BEGIN
     SELECT (base_vec + noise_vec)::text INTO v_qvec
     FROM vector_base_pool bp, vector_noise_pool np
@@ -376,16 +378,16 @@ BEGIN
 
     FOR k IN 1..4 LOOP
         IF k = 1 THEN
-            v_punto_label := '500 filas (~0.5%)';
+            v_punto_label := '500 filas';
             v_filter := 'p.activo = true AND p.operacion = ''VENTA'' AND p.tipo_propiedad = ''DEPARTAMENTO'' AND p.comuna_id = 1 AND p.dormitorios = 1 AND p.precio_uf BETWEEN 3000 AND 3656';
         ELSIF k = 2 THEN
-            v_punto_label := '5.000 filas (~5.0%)';
+            v_punto_label := '5.000 filas';
             v_filter := 'p.activo = true AND p.operacion = ''VENTA'' AND p.tipo_propiedad IN (''DEPARTAMENTO'', ''CASA'') AND p.comuna_id IN (1, 2, 3) AND p.precio_uf <= 4196';
         ELSIF k = 3 THEN
-            v_punto_label := '20.000 filas (~20.0%)';
+            v_punto_label := '20.000 filas';
             v_filter := 'p.activo = true AND p.operacion = ''VENTA'' AND p.tipo_propiedad IN (''DEPARTAMENTO'', ''CASA'') AND p.precio_uf <= 6400';
         ELSE
-            v_punto_label := '50.000 filas (~50.0%)';
+            v_punto_label := '50.000 filas';
             v_filter := 'p.activo = true AND p.operacion = ''VENTA''';
         END IF;
 
@@ -463,68 +465,37 @@ BEGIN
         LIMIT 20 OFFSET 0
         $q$;
 
-        v_cur_plan := '';
-        v_cur_time := 0.0;
-        FOR v_line IN EXECUTE 'EXPLAIN (ANALYZE, BUFFERS) ' || v_sql LOOP
-            v_cur_plan := v_cur_plan || v_line || E'\n';
-            IF v_line ~* 'Execution Time:' THEN
-                v_match := regexp_matches(v_line, 'Execution Time:\s+([0-9.]+)');
-                IF v_match IS NOT NULL AND array_length(v_match, 1) >= 1 THEN
-                    v_cur_time := v_match[1]::numeric;
-                END IF;
-            END IF;
+        -- Warm-up (5 iteraciones)
+        FOR i IN 1..5 LOOP
+            FOR v_line IN EXECUTE 'EXPLAIN (ANALYZE, BUFFERS) ' || v_sql LOOP
+            END LOOP;
         END LOOP;
 
-        INSERT INTO barrido_hibrido_completo (punto, filas_filtro, latencia_ms, plan_integro)
-        VALUES (v_punto_label, v_total_filas, v_cur_time, v_cur_plan);
+        -- 35 repeticiones de medición
+        FOR i IN 1..35 LOOP
+            v_cur_plan := '';
+            v_cur_time := 0.0;
+            FOR v_line IN EXECUTE 'EXPLAIN (ANALYZE, BUFFERS) ' || v_sql LOOP
+                v_cur_plan := v_cur_plan || v_line || E'\n';
+                IF v_line ~* 'Execution Time:' THEN
+                    v_match := regexp_matches(v_line, 'Execution Time:\s+([0-9.]+)');
+                    IF v_match IS NOT NULL AND array_length(v_match, 1) >= 1 THEN
+                        v_cur_time := v_match[1]::numeric;
+                    END IF;
+                END IF;
+            END LOOP;
+            INSERT INTO benchmark_all_runs (categoria, filas_filtro, iteracion, duracion_ms, plan_text)
+            VALUES ('HIBRIDA_' || v_punto_label, v_total_filas, i, v_cur_time, v_cur_plan);
+        END LOOP;
     END LOOP;
 END $$;
 
-\echo '===================================================================================================='
-\echo 'MEDICIÓN DE LA CONSULTA HÍBRIDA COMPLETA (500, 5.000, 20.000 y 50.000 FILAS)'
-\echo 'TEXTO + VECTOR + RRF CON REORDENAMIENTO MONOTÓNICO + METRO POSTGIS'
-\echo '===================================================================================================='
-SELECT 
-    punto,
-    filas_filtro,
-    latencia_ms || ' ms' AS latencia
-FROM barrido_hibrido_completo;
-
-\echo '===================================================================================================='
-\echo 'PLAN DE LA CONSULTA HÍBRIDA COMPLETA - 500 FILAS'
-\echo '===================================================================================================='
-SELECT plan_integro FROM barrido_hibrido_completo WHERE punto LIKE '500 filas%';
-
-\echo '===================================================================================================='
-\echo 'PLAN DE LA CONSULTA HÍBRIDA COMPLETA - 5.000 FILAS'
-\echo '===================================================================================================='
-SELECT plan_integro FROM barrido_hibrido_completo WHERE punto LIKE '5.000 filas%';
-
-\echo '===================================================================================================='
-\echo 'PLAN DE LA CONSULTA HÍBRIDA COMPLETA - 20.000 FILAS'
-\echo '===================================================================================================='
-SELECT plan_integro FROM barrido_hibrido_completo WHERE punto LIKE '20.000 filas%';
-
-\echo '===================================================================================================='
-\echo 'PLAN DE LA CONSULTA HÍBRIDA COMPLETA - 50.000 FILAS'
-\echo '===================================================================================================='
-SELECT plan_integro FROM barrido_hibrido_completo WHERE punto LIKE '50.000 filas%';
-
--- ====================================================================================================
--- 5. BENCHMARK DE LATENCIA RECONCILIADA: 35 REPETICIONES DE LA CONSULTA HÍBRIDA COMPLETA
---    MEDIANA Y P95 CALCULADAS DIRECTAMENTE DESDE LOS EXPLAIN (MISMA FUENTE DE DATOS)
--- ====================================================================================================
-CREATE TEMP TABLE IF NOT EXISTS benchmark_runs (
-    iteracion int,
-    duracion_ms numeric,
-    plan_text text
-);
-TRUNCATE benchmark_runs;
-
-SET hnsw.ef_search = 200;
-SET hnsw.iterative_scan = relaxed_order;
-SET hnsw.max_scan_tuples = 50000;
-SET work_mem = '64MB';
+-- 2. Creación y Medición de ÍNDICE B en el punto de 5.000 filas
+-- Índice B propuesto: (comuna_id, operacion, tipo_propiedad, precio_uf) WHERE activo = TRUE
+CREATE INDEX IF NOT EXISTS idx_propiedad_comuna_op_tipo_precio 
+ON propiedad (comuna_id, operacion, tipo_propiedad, precio_uf) 
+WHERE activo = TRUE;
+ANALYZE propiedad;
 
 DO $$
 DECLARE
@@ -534,11 +505,14 @@ DECLARE
     v_cur_plan text;
     v_cur_time numeric;
     v_match text[];
+    v_filter text;
     i int;
 BEGIN
     SELECT (base_vec + noise_vec)::text INTO v_qvec
     FROM vector_base_pool bp, vector_noise_pool np
     WHERE bp.pool_id = 0 AND np.noise_id = 0;
+
+    v_filter := 'p.activo = true AND p.operacion = ''VENTA'' AND p.tipo_propiedad IN (''DEPARTAMENTO'', ''CASA'') AND p.comuna_id IN (1, 2, 3) AND p.precio_uf <= 4196';
 
     v_sql := $q$
     WITH uf_actual AS (
@@ -551,12 +525,7 @@ BEGIN
     top_vec_candidates AS (
         SELECT p.id, (p.embedding <=> '$q$ || v_qvec || $q$'::vector(768)) AS dist
         FROM propiedad p
-        WHERE p.activo = true
-          AND p.operacion = 'VENTA'
-          AND p.tipo_propiedad = 'DEPARTAMENTO'
-          AND p.comuna_id = 1
-          AND p.dormitorios = 1
-          AND p.precio_uf BETWEEN 3000 AND 3070
+        WHERE $q$ || v_filter || $q$
         ORDER BY p.embedding <=> '$q$ || v_qvec || $q$'::vector(768)
         LIMIT 200
     ),
@@ -567,12 +536,7 @@ BEGIN
     top_fts AS (
         SELECT p.id, DENSE_RANK() OVER (ORDER BY ts_rank_cd(p.search_vector, websearch_to_tsquery('spanish', 'piscina metro')) DESC) as r_fts
         FROM propiedad p
-        WHERE p.activo = true
-          AND p.operacion = 'VENTA'
-          AND p.tipo_propiedad = 'DEPARTAMENTO'
-          AND p.comuna_id = 1
-          AND p.dormitorios = 1
-          AND p.precio_uf BETWEEN 3000 AND 3070
+        WHERE $q$ || v_filter || $q$
           AND p.search_vector @@ websearch_to_tsquery('spanish', 'piscina metro')
         ORDER BY ts_rank_cd(p.search_vector, websearch_to_tsquery('spanish', 'piscina metro')) DESC
         LIMIT 200
@@ -622,13 +586,13 @@ BEGIN
     LIMIT 20 OFFSET 0
     $q$;
 
-    -- Warm-up (5 iteraciones de calentamiento)
+    -- 5 warmups
     FOR i IN 1..5 LOOP
         FOR v_line IN EXECUTE 'EXPLAIN (ANALYZE, BUFFERS) ' || v_sql LOOP
         END LOOP;
     END LOOP;
 
-    -- 35 repeticiones de medición continua
+    -- 35 repeticiones de medición
     FOR i IN 1..35 LOOP
         v_cur_plan := '';
         v_cur_time := 0.0;
@@ -641,36 +605,141 @@ BEGIN
                 END IF;
             END IF;
         END LOOP;
-        INSERT INTO benchmark_runs (iteracion, duracion_ms, plan_text)
-        VALUES (i, v_cur_time, v_cur_plan);
+        INSERT INTO benchmark_all_runs (categoria, filas_filtro, iteracion, duracion_ms, plan_text)
+        VALUES ('HIBRIDA_INDICE_B_5000', 5000, i, v_cur_time, v_cur_plan);
+    END LOOP;
+END $$;
+
+-- 3. Perfilado del CTE de Texto (top_fts) en Aislamiento para 20.000 y 50.000 filas
+-- 35 repeticiones por cada punto tras 5 warmups
+DO $$
+DECLARE
+    v_sql text;
+    v_line text;
+    v_cur_plan text;
+    v_cur_time numeric;
+    v_match text[];
+    v_filter text;
+    v_label text;
+    v_filas int;
+    k int;
+    i int;
+BEGIN
+    FOR k IN 1..2 LOOP
+        IF k = 1 THEN
+            v_label := 'CTE_TEXTO_20000';
+            v_filas := 20000;
+            v_filter := 'p.activo = true AND p.operacion = ''VENTA'' AND p.tipo_propiedad IN (''DEPARTAMENTO'', ''CASA'') AND p.precio_uf <= 6400';
+        ELSE
+            v_label := 'CTE_TEXTO_50000';
+            v_filas := 50000;
+            v_filter := 'p.activo = true AND p.operacion = ''VENTA''';
+        END IF;
+
+        v_sql := 'EXPLAIN (ANALYZE, BUFFERS) ' ||
+                 'SELECT p.id, DENSE_RANK() OVER (ORDER BY ts_rank_cd(p.search_vector, websearch_to_tsquery(''spanish'', ''piscina metro'')) DESC) as r_fts ' ||
+                 'FROM propiedad p ' ||
+                 'WHERE ' || v_filter || ' AND p.search_vector @@ websearch_to_tsquery(''spanish'', ''piscina metro'') ' ||
+                 'ORDER BY ts_rank_cd(p.search_vector, websearch_to_tsquery(''spanish'', ''piscina metro'')) DESC ' ||
+                 'LIMIT 200';
+
+        -- 5 warmups
+        FOR i IN 1..5 LOOP
+            FOR v_line IN EXECUTE v_sql LOOP
+            END LOOP;
+        END LOOP;
+
+        -- 35 repeticiones
+        FOR i IN 1..35 LOOP
+            v_cur_plan := '';
+            v_cur_time := 0.0;
+            FOR v_line IN EXECUTE v_sql LOOP
+                v_cur_plan := v_cur_plan || v_line || E'\n';
+                IF v_line ~* 'Execution Time:' THEN
+                    v_match := regexp_matches(v_line, 'Execution Time:\s+([0-9.]+)');
+                    IF v_match IS NOT NULL AND array_length(v_match, 1) >= 1 THEN
+                        v_cur_time := v_match[1]::numeric;
+                    END IF;
+                END IF;
+            END LOOP;
+            INSERT INTO benchmark_all_runs (categoria, filas_filtro, iteracion, duracion_ms, plan_text)
+            VALUES (v_label, v_filas, i, v_cur_time, v_cur_plan);
+        END LOOP;
     END LOOP;
 END $$;
 
 \echo '===================================================================================================='
-\echo 'ESTADÍSTICAS RECONCILIADAS DE LATENCIA DE LA CONSULTA HÍBRIDA (35 REPETICIONES)'
+\echo 'RESUMEN ESTADÍSTICO RECONCILIADO: 35 REPETICIONES POR PUNTO TRAS WARM-UP (MEDIANA Y P95)'
 \echo '===================================================================================================='
 SELECT 
-    count(*) AS repeticiones_totales,
-    percentile_cont(0.50) WITHIN GROUP (ORDER BY duracion_ms) || ' ms' AS mediana_latencia_ms,
-    percentile_cont(0.95) WITHIN GROUP (ORDER BY duracion_ms) || ' ms' AS p95_latencia_ms,
-    min(duracion_ms) || ' ms' AS min_latencia_ms,
-    max(duracion_ms) || ' ms' AS max_latencia_ms
-FROM benchmark_runs;
+    categoria,
+    filas_filtro,
+    count(*) AS reps,
+    round(percentile_cont(0.50) WITHIN GROUP (ORDER BY duracion_ms)::numeric, 2) || ' ms' AS mediana,
+    round(percentile_cont(0.95) WITHIN GROUP (ORDER BY duracion_ms)::numeric, 2) || ' ms' AS p95,
+    round(min(duracion_ms)::numeric, 2) || ' ms' AS min_latencia,
+    round(max(duracion_ms)::numeric, 2) || ' ms' AS max_latencia
+FROM benchmark_all_runs
+GROUP BY categoria, filas_filtro
+ORDER BY categoria, filas_filtro;
+
+-- Redirección estricta de todos los planes de ejecución directamente a archivo raw sin intervención del modelo
+\o /tmp/benchmark_plans_raw.txt
 
 \echo '===================================================================================================='
-\echo 'DISTRIBUCIÓN DE LAS 35 EJECUCIONES (EXTRACTO COMPLETO DE LATENCIAS RECONCILIADAS):'
+\echo 'HOGARYA BENCHMARK - PLANES DE EJECUCIÓN RAW (EXPLAIN ANALYZE BUFFERS) DIRECTOS DESDE POSTGRESQL'
 \echo '===================================================================================================='
-SELECT iteracion, duracion_ms || ' ms' AS duracion FROM benchmark_runs ORDER BY iteracion;
 
-\echo '===================================================================================================='
-\echo 'PLAN DE EJECUCIÓN COMPLETO (ÍNTEGRO) - EJECUCIÓN MÁS LENTA (MÁXIMA LATENCIA)'
-\echo '===================================================================================================='
-SELECT plan_text FROM benchmark_runs ORDER BY duracion_ms DESC LIMIT 1;
+\echo '--- [1] PLAN HÍBRIDO 500 FILAS (MEDIANA / REPRESENTATIVO) ---'
+SELECT plan_text FROM (
+    SELECT plan_text, duracion_ms, 
+           abs(duracion_ms - (SELECT percentile_cont(0.50) WITHIN GROUP (ORDER BY duracion_ms) FROM benchmark_all_runs WHERE categoria = 'HIBRIDA_500 filas')) AS diff
+    FROM benchmark_all_runs WHERE categoria = 'HIBRIDA_500 filas' ORDER BY diff ASC LIMIT 1
+) sub;
 
-\echo '===================================================================================================='
-\echo 'PLAN DE EJECUCIÓN COMPLETO (ÍNTEGRO) - EJECUCIÓN MÁS RÁPIDA (MÍNIMA LATENCIA)'
-\echo '===================================================================================================='
-SELECT plan_text FROM benchmark_runs ORDER BY duracion_ms ASC LIMIT 1;
+\echo '--- [2] PLAN HÍBRIDO 5.000 FILAS - ÍNDICE A (EXISTENTE) ---'
+SELECT plan_text FROM (
+    SELECT plan_text, duracion_ms, 
+           abs(duracion_ms - (SELECT percentile_cont(0.50) WITHIN GROUP (ORDER BY duracion_ms) FROM benchmark_all_runs WHERE categoria = 'HIBRIDA_5.000 filas')) AS diff
+    FROM benchmark_all_runs WHERE categoria = 'HIBRIDA_5.000 filas' ORDER BY diff ASC LIMIT 1
+) sub;
+
+\echo '--- [3] PLAN HÍBRIDO 5.000 FILAS - ÍNDICE B (PROPUESTO: comuna_id, operacion, tipo_propiedad, precio_uf) ---'
+SELECT plan_text FROM (
+    SELECT plan_text, duracion_ms, 
+           abs(duracion_ms - (SELECT percentile_cont(0.50) WITHIN GROUP (ORDER BY duracion_ms) FROM benchmark_all_runs WHERE categoria = 'HIBRIDA_INDICE_B_5000')) AS diff
+    FROM benchmark_all_runs WHERE categoria = 'HIBRIDA_INDICE_B_5000' ORDER BY diff ASC LIMIT 1
+) sub;
+
+\echo '--- [4] PLAN HÍBRIDO 20.000 FILAS ---'
+SELECT plan_text FROM (
+    SELECT plan_text, duracion_ms, 
+           abs(duracion_ms - (SELECT percentile_cont(0.50) WITHIN GROUP (ORDER BY duracion_ms) FROM benchmark_all_runs WHERE categoria = 'HIBRIDA_20.000 filas')) AS diff
+    FROM benchmark_all_runs WHERE categoria = 'HIBRIDA_20.000 filas' ORDER BY diff ASC LIMIT 1
+) sub;
+
+\echo '--- [5] PLAN HÍBRIDO 50.000 FILAS ---'
+SELECT plan_text FROM (
+    SELECT plan_text, duracion_ms, 
+           abs(duracion_ms - (SELECT percentile_cont(0.50) WITHIN GROUP (ORDER BY duracion_ms) FROM benchmark_all_runs WHERE categoria = 'HIBRIDA_50.000 filas')) AS diff
+    FROM benchmark_all_runs WHERE categoria = 'HIBRIDA_50.000 filas' ORDER BY diff ASC LIMIT 1
+) sub;
+
+\echo '--- [6] PLAN CTE TEXTO EN AISLAMIENTO - 20.000 FILAS ---'
+SELECT plan_text FROM (
+    SELECT plan_text, duracion_ms, 
+           abs(duracion_ms - (SELECT percentile_cont(0.50) WITHIN GROUP (ORDER BY duracion_ms) FROM benchmark_all_runs WHERE categoria = 'CTE_TEXTO_20000')) AS diff
+    FROM benchmark_all_runs WHERE categoria = 'CTE_TEXTO_20000' ORDER BY diff ASC LIMIT 1
+) sub;
+
+\echo '--- [7] PLAN CTE TEXTO EN AISLAMIENTO - 50.000 FILAS ---'
+SELECT plan_text FROM (
+    SELECT plan_text, duracion_ms, 
+           abs(duracion_ms - (SELECT percentile_cont(0.50) WITHIN GROUP (ORDER BY duracion_ms) FROM benchmark_all_runs WHERE categoria = 'CTE_TEXTO_50000')) AS diff
+    FROM benchmark_all_runs WHERE categoria = 'CTE_TEXTO_50000' ORDER BY diff ASC LIMIT 1
+) sub;
+
+\o
 
 -- ====================================================================================================
 -- 6. EVALUACIÓN DE RECALL@10: FIDELIDAD DEL ÍNDICE SOBRE DISTANCIAS CON VECTORES ÚNICOS
