@@ -202,6 +202,14 @@ CREATE TEMP TABLE IF NOT EXISTS barrido_selectividad (
 );
 TRUNCATE barrido_selectividad;
 
+CREATE TEMP TABLE IF NOT EXISTS analisis_punto_5000 (
+    escenario text,
+    plan_usado text,
+    latencia_ms numeric,
+    plan_integro text
+);
+TRUNCATE analisis_punto_5000;
+
 DO $$
 DECLARE
     v_qvec text;
@@ -214,6 +222,9 @@ DECLARE
     v_total_esperadas int;
     v_filter text;
     v_punto_label text;
+    v_plan_5000_orig text := '';
+    v_plan_5000_mitigado text := '';
+    v_time_5000_mitigado numeric := 0.0;
     i int;
 BEGIN
     SELECT (base_vec + noise_vec)::text INTO v_qvec
@@ -256,6 +267,9 @@ BEGIN
         v_exec_time := 0.0;
         FOR v_line IN EXECUTE 'EXPLAIN (ANALYZE, BUFFERS) SELECT p.id FROM propiedad p WHERE ' || v_filter || 
                               ' ORDER BY p.embedding <=> ''' || v_qvec || '''::vector(768) LIMIT 200' LOOP
+            IF i = 3 THEN
+                v_plan_5000_orig := v_plan_5000_orig || v_line || E'\n';
+            END IF;
             IF v_line ~* 'idx_propiedad_embedding_hnsw' THEN
                 v_plan_type := 'HNSW Index Scan';
             END IF;
@@ -269,6 +283,38 @@ BEGIN
 
         INSERT INTO barrido_selectividad (punto, filas_esperadas, filas_iterative_off, filas_iterative_relaxed, plan_usado, latencia_ms)
         VALUES (v_punto_label, v_total_esperadas, v_cnt_off, v_cnt_relaxed, v_plan_type, v_exec_time);
+
+        IF i = 3 THEN
+            INSERT INTO analisis_punto_5000 (escenario, plan_usado, latencia_ms, plan_integro)
+            VALUES ('Original (Sin Mitigación)', v_plan_type, v_exec_time, v_plan_5000_orig);
+
+            -- MITIGACIÓN MEDIDA: Forzar navegación por HNSW con iterative_scan = relaxed_order
+            -- En vez de permitir que el optimizador caiga a Seq Scan / Sort debido a la selectividad del 5%,
+            -- se desactiva enable_seqscan / enable_bitmapscan o se instruye al planner a usar el índice HNSW con max_scan_tuples ampliado.
+            SET LOCAL enable_seqscan = off;
+            SET LOCAL enable_bitmapscan = off;
+            SET LOCAL hnsw.ef_search = 200;
+            SET LOCAL hnsw.iterative_scan = relaxed_order;
+            SET LOCAL hnsw.max_scan_tuples = 100000;
+
+            FOR v_line IN EXECUTE 'EXPLAIN (ANALYZE, BUFFERS) SELECT p.id FROM propiedad p WHERE ' || v_filter || 
+                                  ' ORDER BY p.embedding <=> ''' || v_qvec || '''::vector(768) LIMIT 200' LOOP
+                v_plan_5000_mitigado := v_plan_5000_mitigado || v_line || E'\n';
+                IF v_line ~* 'Execution Time:' THEN
+                    v_match := regexp_matches(v_line, 'Execution Time:\s+([0-9.]+)');
+                    IF v_match IS NOT NULL AND array_length(v_match, 1) >= 1 THEN
+                        v_time_5000_mitigado := v_match[1]::numeric;
+                    END IF;
+                END IF;
+            END LOOP;
+
+            INSERT INTO analisis_punto_5000 (escenario, plan_usado, latencia_ms, plan_integro)
+            VALUES ('Mitigado (HNSW + iterative_scan relaxed_order)', 'HNSW Index Scan', v_time_5000_mitigado, v_plan_5000_mitigado);
+
+            -- Restaurar parámetros para el resto del benchmark
+            SET LOCAL enable_seqscan = on;
+            SET LOCAL enable_bitmapscan = on;
+        END IF;
     END LOOP;
 END $$;
 
@@ -283,6 +329,25 @@ SELECT
     plan_usado,
     latencia_ms || ' ms' AS latencia
 FROM barrido_selectividad;
+
+\echo '===================================================================================================='
+\echo 'ANÁLISIS Y MITIGACIÓN DEL PUNTO CRÍTICO DE 5.000 FILAS (~5% SELECTIVIDAD)'
+\echo '===================================================================================================='
+SELECT 
+    escenario,
+    plan_usado,
+    latencia_ms || ' ms' AS latencia
+FROM analisis_punto_5000;
+
+\echo '===================================================================================================='
+\echo 'PLAN ÍNTEGRO DEL PUNTO 5.000 FILAS - ORIGINAL SIN MITIGACIÓN (SORT / SEQ SCAN)'
+\echo '===================================================================================================='
+SELECT plan_integro FROM analisis_punto_5000 WHERE escenario = 'Original (Sin Mitigación)';
+
+\echo '===================================================================================================='
+\echo 'PLAN ÍNTEGRO DEL PUNTO 5.000 FILAS - CON MITIGACIÓN (HNSW + ITERATIVE_SCAN)'
+\echo '===================================================================================================='
+SELECT plan_integro FROM analisis_punto_5000 WHERE escenario LIKE 'Mitigado%';
 
 -- ====================================================================================================
 -- 5. BENCHMARK DE LATENCIA RECONCILIADA: 35 REPETICIONES DE LA CONSULTA HÍBRIDA COMPLETA

@@ -9,3 +9,5 @@ backend/target/
 .aistudio/
 .env*
 !.env.example
+benchmark-results.txt
+benchmark-100k-hnsw-results/

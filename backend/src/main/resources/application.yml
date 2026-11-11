@@ -24,7 +24,7 @@ hogarya:
     cookie:
       secure: ${HOGARYA_COOKIE_SECURE:true}
       same-site: ${HOGARYA_COOKIE_SAME_SITE:Lax}
-    trusted-proxies: ${HOGARYA_TRUSTED_PROXIES:127.0.0.1,::1,0:0:0:0:0:0:0:1,10.0.0.1}
+    trusted-proxies: ${HOGARYA_TRUSTED_PROXIES:}
   outbox:
     interval-ms: 2000
 
@@ -43,6 +43,7 @@ hogarya:
       secret: ${HOGARYA_JWT_SECRET:ClaveSecretaHogarYaChileSuperSegura2026DeAlMenos256BitsLongitudMinima}
     cookie:
       secure: ${HOGARYA_COOKIE_SECURE:false}
+    trusted-proxies: ${HOGARYA_TRUSTED_PROXIES:127.0.0.1,::1,0:0:0:0:0:0:0:1,10.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
 
 ---
 # Perfil de Pruebas Unitarias e Integración
@@ -59,3 +60,4 @@ hogarya:
       secret: ${HOGARYA_JWT_SECRET:ClaveSecretaHogarYaChileSuperSegura2026DeAlMenos256BitsLongitudMinima}
     cookie:
       secure: ${HOGARYA_COOKIE_SECURE:false}
+    trusted-proxies: ${HOGARYA_TRUSTED_PROXIES:127.0.0.1,::1,0:0:0:0:0:0:0:1,10.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}

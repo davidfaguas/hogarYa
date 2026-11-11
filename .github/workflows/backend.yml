@@ -44,9 +44,11 @@ jobs:
         run: |
           docker build -t hogarya-bench-db backend -f backend/Dockerfile.test-db
 
-      - name: Start PostgreSQL container
+      - name: Start PostgreSQL container (Limited Resources: 1 CPU / 1 GB)
         run: |
           docker run -d --name pg-bench \
+            --cpus=1.0 \
+            --memory=1024m \
             -e POSTGRES_DB=hogarya_db \
             -e POSTGRES_USER=hogarya_app \
             -e POSTGRES_PASSWORD=hogarya_secret \

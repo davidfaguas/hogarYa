@@ -17,6 +17,18 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
 
 import java.util.List;
 
+/**
+ * Configuración Central de Seguridad Web y CORS.
+ *
+ * TOPOLOGÍA DE DESPLIEGUE Y POLÍTICA SAMESITE DE COOKIES:
+ * 1. Topología A (Mismo dominio / Reverse Proxy unificado, ej. hogarya.cl/api y hogarya.cl/):
+ *    - Cookie de sesión: SameSite=Strict o Lax, Secure=true, HttpOnly=true.
+ *    - No requiere cabeceras CORS cross-origin complejas; protección nativa contra CSRF.
+ * 2. Topología B (Subdominios separados o Cloud Run, ej. api.hogarya.cl y app.hogarya.cl o *.run.app):
+ *    - CORS explícito con AllowCredentials=true y AllowedOriginPatterns validados.
+ *    - ExposedHeaders: Set-Cookie, Location.
+ *    - Cookie de sesión: SameSite=Lax (para subdominios bajo .hogarya.cl) o SameSite=None + Secure (para dominios distintos).
+ */
 @Configuration
 @EnableWebSecurity
 public class SecurityConfig {
@@ -38,7 +50,7 @@ public class SecurityConfig {
                 .requestMatchers(HttpMethod.GET, "/api/v1/propiedades/**").permitAll()
                 .requestMatchers(HttpMethod.POST, "/api/v1/propiedades/busqueda").permitAll()
                 .requestMatchers(HttpMethod.GET, "/api/v1/finanzas/uf/**").permitAll()
-                .requestMatchers(HttpMethod.POST, "/api/v1/finanzas/simular-credito").permitAll()
+                .requestMatchers(HttpMethod.POST, "/api/v1/finanzas/simular-credito", "/api/v1/simulador").permitAll()
                 .requestMatchers(HttpMethod.POST, "/api/v1/subsidios/evaluar").permitAll()
                 .requestMatchers(HttpMethod.POST, "/api/v1/leads").permitAll()
                 // Auth endpoints públicos
@@ -47,7 +59,7 @@ public class SecurityConfig {
                 .requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
                 // Actuator y salud
                 .requestMatchers("/actuator/health", "/actuator/info").permitAll()
-                // Cualquier otra solicitud requiere autenticación
+                // Cualquier otra solicitud (ej. /api/v1/favoritos) requiere autenticación
                 .anyRequest().authenticated()
             )
             .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);

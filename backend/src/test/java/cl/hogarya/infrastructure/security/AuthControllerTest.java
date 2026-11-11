@@ -336,4 +336,84 @@ class AuthControllerTest {
         assertEquals("198.51.100.25", resolved,
                 "Debe resolver 198.51.100.25 ignorando el prefijo falso 203.0.113.195 y saltando el proxy confiable 10.0.0.2");
     }
+
+    @Test
+    @DisplayName("Seguridad IP: Soporte de rangos CIDR en proxies de confianza (IPv4 e IPv6)")
+    void shouldMatchTrustedProxiesUsingCidrRanges() {
+        AuthController.UserLookup emptyLookup = identifier -> Optional.empty();
+        Set<String> trusted = Set.of("10.0.0.0/8", "192.168.0.0/16", "172.16.0.0/12", "127.0.0.1", "::1");
+        AuthController authController = AuthController.forTestingWithClock(
+                tokenService, passwordEncoder, emptyLookup, true, "Strict", Clock.systemUTC(), trusted
+        );
+
+        // IPs dentro de los rangos CIDR configurados deben ser reconocidas como proxies de confianza
+        assertTrue(authController.isTrustedProxy("10.1.2.3"), "10.1.2.3 debe coincidir con 10.0.0.0/8");
+        assertTrue(authController.isTrustedProxy("10.255.255.254"), "10.255.255.254 debe coincidir con 10.0.0.0/8");
+        assertTrue(authController.isTrustedProxy("192.168.1.100"), "192.168.1.100 debe coincidir con 192.168.0.0/16");
+        assertTrue(authController.isTrustedProxy("172.16.50.1"), "172.16.50.1 debe coincidir con 172.16.0.0/12");
+        assertTrue(authController.isTrustedProxy("127.0.0.1"), "127.0.0.1 debe coincidir con IP exacta");
+
+        // IPs fuera de los rangos NO deben ser consideradas proxies de confianza
+        assertFalse(authController.isTrustedProxy("198.51.100.1"), "198.51.100.1 es IP pública, no proxy confiable");
+        assertFalse(authController.isTrustedProxy("172.32.0.1"), "172.32.0.1 está fuera de 172.16.0.0/12");
+        assertFalse(authController.isTrustedProxy("8.8.8.8"), "8.8.8.8 no es proxy confiable");
+    }
+
+    @Test
+    @DisplayName("Seguridad IP: Login desde dos redes distintas - se cuentan como IPs distintas y bloqueo en una no bloquea a la otra")
+    void shouldCountLoginsFromDifferentNetworksSeparatelyAndNotBlockAcrossNetworks() {
+        String validEmail = "usuario.redes@hogarya.cl";
+        String validRut = "11.111.112-K";
+        String password = "claveCorrecta2026!";
+        String encoded = passwordEncoder.encode(password);
+
+        AuthController.UserLookup userLookup = identifier -> Optional.of(
+                new AuthController.UsuarioAuth(validRut, validEmail, encoded, "ROLE_CLIENTE", true)
+        );
+
+        Set<String> trusted = Set.of("10.0.0.0/8", "172.16.0.0/12");
+        AuthController authController = AuthController.forTestingWithClock(
+                tokenService, passwordEncoder, userLookup, true, "Strict", Clock.systemUTC(), trusted
+        );
+
+        // Red A: Cliente 198.51.100.10 a través del proxy 10.0.0.1
+        MockHttpServletRequest reqRedA = new MockHttpServletRequest();
+        reqRedA.setRemoteAddr("10.0.0.1");
+        reqRedA.addHeader("X-Forwarded-For", "198.51.100.10");
+
+        // Red B: Cliente 203.0.113.20 a través del proxy 172.16.1.1
+        MockHttpServletRequest reqRedB = new MockHttpServletRequest();
+        reqRedB.setRemoteAddr("172.16.1.1");
+        reqRedB.addHeader("X-Forwarded-For", "203.0.113.20");
+
+        assertEquals("198.51.100.10", authController.resolveClientIp(reqRedA));
+        assertEquals("203.0.113.20", authController.resolveClientIp(reqRedB));
+
+        // 5 intentos fallidos consecutivos desde la Red A para bloquearla
+        for (int i = 0; i < 5; i++) {
+            ResponseEntity<AuthController.AuthResponse> resp = authController.login(
+                    new AuthController.LoginRequest(validEmail, "claveEquivocada", null),
+                    reqRedA
+            );
+            assertEquals(HttpStatus.UNAUTHORIZED.value(), resp.getStatusCode().value());
+        }
+
+        // El 6to intento desde la Red A debe retornar 429 TOO_MANY_REQUESTS
+        ResponseEntity<AuthController.AuthResponse> respRedABlocked = authController.login(
+                new AuthController.LoginRequest(validEmail, "claveEquivocada", null),
+                reqRedA
+        );
+        assertEquals(HttpStatus.TOO_MANY_REQUESTS.value(), respRedABlocked.getStatusCode().value(),
+                "Red A debe quedar bloqueada tras 5 intentos fallidos");
+
+        // Mientras tanto, la petición legítima desde la Red B debe tener ÉXITO (200 OK con cookie emitida)
+        ResponseEntity<AuthController.AuthResponse> respRedB = authController.login(
+                new AuthController.LoginRequest(validEmail, password, null),
+                reqRedB
+        );
+        assertEquals(HttpStatus.OK.value(), respRedB.getStatusCode().value(),
+                "Un bloqueo por rate limit en la Red A NO debe afectar los logins legítimos desde la Red B");
+        assertTrue(respRedB.getHeaders().containsKey(HttpHeaders.SET_COOKIE),
+                "La sesión debe iniciarse exitosamente emitiendo la cookie Set-Cookie");
+    }
 }

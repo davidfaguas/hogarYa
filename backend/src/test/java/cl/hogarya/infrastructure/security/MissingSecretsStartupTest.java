@@ -1,9 +1,11 @@
 package cl.hogarya.infrastructure.security;
 
 import cl.hogarya.HogarYaApplication;
+import cl.hogarya.domain.service.search.EmbeddingProvider;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.builder.SpringApplicationBuilder;
+import org.springframework.context.support.GenericApplicationContext;
 
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -45,5 +47,44 @@ class MissingSecretsStartupTest {
             current = current.getCause();
         }
         assertTrue(foundExplicitMessage, "Debe contener el mensaje claro que explica la falta de EmbeddingProvider en prod");
+    }
+
+    @Test
+    @DisplayName("Falla al arrancar en perfil producción si HOGARYA_TRUSTED_PROXIES no está definida")
+    void shouldFailToStartInProductionWithoutTrustedProxiesConfigured() {
+        EmbeddingProvider dummyProvider = new EmbeddingProvider() {
+            @Override
+            public float[] generateEmbedding(String text) {
+                return new float[768];
+            }
+            @Override
+            public int getDimensions() {
+                return 768;
+            }
+        };
+
+        Exception ex = assertThrows(Exception.class, () -> {
+            new SpringApplicationBuilder(HogarYaApplication.class)
+                    .profiles("prod")
+                    .initializers((GenericApplicationContext ctx) -> ctx.registerBean(EmbeddingProvider.class, () -> dummyProvider))
+                    .run(
+                            "--server.port=0",
+                            "--spring.datasource.password=test_secret",
+                            "--spring.flyway.enabled=false",
+                            "--hogarya.security.jwt.secret=ClaveSecretaHogarYaChileSuperSegura2026DeAlMenos256BitsLongitudMinima"
+                            // HOGARYA_TRUSTED_PROXIES no se pasa intencionalmente
+                    );
+        });
+
+        Throwable current = ex;
+        boolean foundExplicitMessage = false;
+        while (current != null) {
+            if (current.getMessage() != null && current.getMessage().contains("La variable de entorno HOGARYA_TRUSTED_PROXIES es obligatoria")) {
+                foundExplicitMessage = true;
+                break;
+            }
+            current = current.getCause();
+        }
+        assertTrue(foundExplicitMessage, "Debe contener el mensaje claro indicando que HOGARYA_TRUSTED_PROXIES es obligatoria en prod");
     }
 }

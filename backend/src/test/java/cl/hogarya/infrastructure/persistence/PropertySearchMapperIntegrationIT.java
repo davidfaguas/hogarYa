@@ -209,9 +209,9 @@ class PropertySearchMapperIntegrationIT {
     }
 
     @Test
-    @DisplayName("Pgvector: Búsqueda vectorial real de extremo a extremo usando embedding de consulta")
-    void shouldExecuteVectorSearchWithRealEmbeddingToPgVector() {
-        // Generar vector real mediante EmbeddingProvider
+    @DisplayName("Pgvector: Búsqueda vectorial real de extremo a extremo probando la ruta técnica hacia pgvector con FakeEmbeddingProvider (no calidad semántica)")
+    void shouldExecuteVectorSearchRouteToPgVectorWithFakeEmbedding() {
+        // Generar vector determinista mediante FakeEmbeddingProvider para probar la ruta técnica hacia pgvector
         float[] queryVector = embeddingProvider.generateEmbedding("piscina y quincho departamento luminoso");
 
         PropertySearchCriteria criteria = new PropertySearchCriteria(

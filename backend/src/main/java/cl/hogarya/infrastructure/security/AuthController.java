@@ -1,9 +1,16 @@
 package cl.hogarya.infrastructure.security;
 
 import cl.hogarya.domain.model.identity.ChileanRut;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.env.Environment;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseCookie;
@@ -12,6 +19,7 @@ import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.web.bind.annotation.*;
 
+import java.net.InetAddress;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -26,11 +34,12 @@ import java.util.concurrent.ConcurrentMap;
  * - Mitigación de Timing Attacks (compara contra dummy hash generado con el mismo strength que los reales)
  * - Rate limiting por tupla (identificador + IP) con tope de 5 intentos fallidos
  * - Tope global por identificador (20 intentos fallidos máximos en ventana de 15 min a través de cualquier IP)
- * - Proxy de confianza: No confía a ciegas en X-Forwarded-For si el remoteAddr no es un proxy autorizado
+ * - Proxy de confianza con soporte CIDR (ej. 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) y recorrido de derecha a izquierda
  * - HttpOnly, Secure, SameSite
  */
 @RestController
 @RequestMapping("/api/v1/auth")
+@Tag(name = "Autenticación", description = "Endpoints seguros de login y logout con emisión de cookie JWT HttpOnly")
 public class AuthController {
 
     public static final int MAX_FAILED_ATTEMPTS_PER_IP = 5;
@@ -44,7 +53,7 @@ public class AuthController {
     private final String sameSite;
     private final String dummyPasswordHash;
     private final Clock clock;
-    private final Set<String> trustedProxies;
+    private final List<TrustedProxyMatcher> trustedProxyMatchers;
 
     private final ConcurrentMap<String, AttemptInfo> ipAttempts = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, AttemptInfo> globalUserAttempts = new ConcurrentHashMap<>();
@@ -65,7 +74,8 @@ public class AuthController {
             JdbcClient jdbcClient,
             @Value("${hogarya.security.cookie.secure:true}") boolean secureCookie,
             @Value("${hogarya.security.cookie.same-site:Strict}") String sameSite,
-            @Value("${hogarya.security.trusted-proxies:127.0.0.1,::1,0:0:0:0:0:0:0:1,10.0.0.1}") String trustedProxiesConfig
+            @Value("${hogarya.security.trusted-proxies:}") String trustedProxiesConfig,
+            @Autowired(required = false) Environment env
     ) {
         this(
                 jwtTokenService,
@@ -81,8 +91,19 @@ public class AuthController {
                 secureCookie,
                 sameSite,
                 Clock.systemUTC(),
-                parseTrustedProxies(trustedProxiesConfig)
+                parseTrustedProxies(validateTrustedProxiesConfig(trustedProxiesConfig, env))
         );
+    }
+
+    private static String validateTrustedProxiesConfig(String config, Environment env) {
+        boolean isProd = env != null && Arrays.asList(env.getActiveProfiles()).contains("prod");
+        if (isProd && (config == null || config.trim().isBlank())) {
+            throw new IllegalStateException(
+                    "Fallo al arrancar en perfil producción: La variable de entorno HOGARYA_TRUSTED_PROXIES es obligatoria " +
+                    "y no tiene valor por defecto en producción. Configure la lista de IPs o rangos CIDR de proxies autorizados."
+            );
+        }
+        return config;
     }
 
     public static AuthController forTesting(
@@ -94,7 +115,7 @@ public class AuthController {
     ) {
         return new AuthController(
                 jwtTokenService, passwordEncoder, userLookup, secureCookie, sameSite,
-                Clock.systemUTC(), Set.of("127.0.0.1", "::1", "10.0.0.1")
+                Clock.systemUTC(), parseTrustedProxies("127.0.0.1,::1,10.0.0.1")
         );
     }
 
@@ -108,7 +129,7 @@ public class AuthController {
     ) {
         return new AuthController(
                 jwtTokenService, passwordEncoder, userLookup, secureCookie, sameSite, clock,
-                Set.of("127.0.0.1", "::1", "10.0.0.1")
+                parseTrustedProxies("127.0.0.1,::1,10.0.0.1")
         );
     }
 
@@ -121,7 +142,13 @@ public class AuthController {
             Clock clock,
             Set<String> trustedProxies
     ) {
-        return new AuthController(jwtTokenService, passwordEncoder, userLookup, secureCookie, sameSite, clock, trustedProxies);
+        List<TrustedProxyMatcher> matchers = new ArrayList<>();
+        if (trustedProxies != null) {
+            for (String p : trustedProxies) {
+                matchers.add(createMatcher(p));
+            }
+        }
+        return new AuthController(jwtTokenService, passwordEncoder, userLookup, secureCookie, sameSite, clock, matchers);
     }
 
     private AuthController(
@@ -131,7 +158,7 @@ public class AuthController {
             boolean secureCookie,
             String sameSite,
             Clock clock,
-            Set<String> trustedProxies
+            List<TrustedProxyMatcher> trustedProxyMatchers
     ) {
         this.jwtTokenService = jwtTokenService;
         this.passwordEncoder = passwordEncoder;
@@ -139,7 +166,7 @@ public class AuthController {
         this.secureCookie = secureCookie;
         this.sameSite = sameSite;
         this.clock = clock;
-        this.trustedProxies = trustedProxies != null ? trustedProxies : Collections.emptySet();
+        this.trustedProxyMatchers = trustedProxyMatchers != null ? trustedProxyMatchers : Collections.emptyList();
         this.dummyPasswordHash = passwordEncoder.encode("hogarya-timing-mitigation-dummy-password");
     }
 
@@ -147,10 +174,27 @@ public class AuthController {
         return dummyPasswordHash;
     }
 
-    public record LoginRequest(String username, String password, String rut) {}
-    public record AuthResponse(String username, String mensaje) {}
+    public record LoginRequest(
+            @Schema(description = "Email o RUT del usuario", example = "usuario@hogarya.cl") String username,
+            @Schema(description = "Contraseña en texto plano", example = "passwordSegura123!") String password,
+            @Schema(description = "RUT opcional explícito", example = "11.111.112-K") String rut
+    ) {}
+
+    public record AuthResponse(
+            @Schema(description = "Email o identificador del usuario autenticado", example = "usuario@hogarya.cl") String username,
+            @Schema(description = "Mensaje informativo del estado de autenticación") String mensaje
+    ) {}
 
     @PostMapping("/login")
+    @Operation(summary = "Inicio de sesión", description = "Valida credenciales contra BCrypt, mitiga timing attacks con dummy hash y emite cookie JWT HttpOnly")
+    @ApiResponses({
+            @ApiResponse(responseCode = "200", description = "Autenticación exitosa con cookie Set-Cookie emitida",
+                    content = @Content(schema = @Schema(implementation = AuthResponse.class))),
+            @ApiResponse(responseCode = "401", description = "Credenciales inválidas",
+                    content = @Content(schema = @Schema(implementation = AuthResponse.class))),
+            @ApiResponse(responseCode = "429", description = "Demasiados intentos fallidos (bloqueo por rate limit)",
+                    content = @Content(schema = @Schema(implementation = AuthResponse.class)))
+    })
     public ResponseEntity<AuthResponse> login(
             @RequestBody LoginRequest request,
             HttpServletRequest httpRequest
@@ -174,13 +218,9 @@ public class AuthController {
                     .body(new AuthResponse(null, "Credenciales inválidas"));
         }
 
-        // 1. Normalización de Identificador (Email o RUT con ChileanRut.of)
         String rawIdentifier = request.username().trim();
         String normalizedIdentifier = normalizeIdentifier(rawIdentifier, request.rut());
 
-        // 2. Control de Tasa:
-        // A) Tope global por identificador (ej. 20 intentos en 15 min independientemente de la IP)
-        // B) Límite por tupla (identificador + IP) (5 intentos en 15 min)
         String ipKey = normalizedIdentifier + "@" + clientIp;
         if (isBlocked(globalUserAttempts, normalizedIdentifier, MAX_GLOBAL_FAILED_ATTEMPTS)
                 || isBlocked(ipAttempts, ipKey, MAX_FAILED_ATTEMPTS_PER_IP)) {
@@ -190,8 +230,6 @@ public class AuthController {
 
         Optional<UsuarioAuth> usuarioOpt = userLookup.findByIdentifier(normalizedIdentifier);
 
-        // 3. Mitigación de Timing Attacks:
-        // Si el usuario no existe, ejecutar matches contra hash dummy con el mismo strength para tiempo constante
         if (usuarioOpt.isEmpty()) {
             passwordEncoder.matches(request.password(), dummyPasswordHash);
             recordFailedAttempt(normalizedIdentifier, ipKey);
@@ -206,7 +244,6 @@ public class AuthController {
                     .body(new AuthResponse(null, "Credenciales inválidas"));
         }
 
-        // Éxito: restablecer intentos fallidos
         resetAttempts(normalizedIdentifier, ipKey);
 
         String username = usuario.email();
@@ -229,6 +266,9 @@ public class AuthController {
     }
 
     @PostMapping("/logout")
+    @Operation(summary = "Cierre de sesión", description = "Invalida la cookie de sesión JWT")
+    @ApiResponse(responseCode = "200", description = "Sesión cerrada exitosamente",
+            content = @Content(schema = @Schema(implementation = AuthResponse.class)))
     public ResponseEntity<AuthResponse> logout() {
         ResponseCookie cookie = ResponseCookie.from(JwtAuthenticationFilter.COOKIE_NAME, "")
                 .httpOnly(true)
@@ -243,14 +283,6 @@ public class AuthController {
                 .body(new AuthResponse(null, "Sesión cerrada exitosamente"));
     }
 
-    /**
-     * Resuelve la dirección IP del cliente de forma segura.
-     * Solo confía en la cabecera X-Forwarded-For si el remoteAddr que entrega la petición
-     * pertenece a la lista de proxies de confianza configurados.
-     * Recorre la cadena X-Forwarded-For de derecha a izquierda (right-to-left traversal),
-     * seleccionando el último salto no confiable (primer IP no confiable de derecha a izquierda),
-     * mitigando la falsificación de cabeceras mediante prefijos inyectados por el cliente.
-     */
     public String resolveClientIp(HttpServletRequest request) {
         if (request == null) return "127.0.0.1";
         String remoteAddr = request.getRemoteAddr() != null ? request.getRemoteAddr().trim() : "127.0.0.1";
@@ -282,17 +314,108 @@ public class AuthController {
         return remoteAddr;
     }
 
-    private boolean isTrustedProxy(String ip) {
-        return trustedProxies.contains(ip);
+    public boolean isTrustedProxy(String ip) {
+        if (ip == null || ip.isBlank()) return false;
+        String cleanIp = ip.trim();
+        for (TrustedProxyMatcher matcher : trustedProxyMatchers) {
+            if (matcher.matches(cleanIp)) {
+                return true;
+            }
+        }
+        return false;
     }
 
-    private static Set<String> parseTrustedProxies(String config) {
-        if (config == null || config.isBlank()) return Collections.emptySet();
-        Set<String> set = new HashSet<>();
+    public interface TrustedProxyMatcher {
+        boolean matches(String ip);
+    }
+
+    private static List<TrustedProxyMatcher> parseTrustedProxies(String config) {
+        if (config == null || config.isBlank()) return Collections.emptyList();
+        List<TrustedProxyMatcher> list = new ArrayList<>();
         for (String s : config.split(",")) {
-            if (!s.isBlank()) set.add(s.trim());
+            String entry = s.trim();
+            if (!entry.isEmpty()) {
+                list.add(createMatcher(entry));
+            }
         }
-        return Collections.unmodifiableSet(set);
+        return Collections.unmodifiableList(list);
+    }
+
+    private static TrustedProxyMatcher createMatcher(String entry) {
+        String trimmed = entry.trim();
+        if (trimmed.contains("/")) {
+            try {
+                return new CidrMatcher(trimmed);
+            } catch (Exception ignored) {}
+        }
+        return new ExactIpMatcher(trimmed);
+    }
+
+    static class ExactIpMatcher implements TrustedProxyMatcher {
+        private final String exactIp;
+        private final byte[] exactBytes;
+
+        ExactIpMatcher(String ip) {
+            this.exactIp = ip.trim();
+            byte[] b = null;
+            try {
+                b = InetAddress.getByName(this.exactIp).getAddress();
+            } catch (Exception ignored) {}
+            this.exactBytes = b;
+        }
+
+        @Override
+        public boolean matches(String ip) {
+            if (exactIp.equalsIgnoreCase(ip.trim())) {
+                return true;
+            }
+            if (exactBytes != null) {
+                try {
+                    byte[] cand = InetAddress.getByName(ip.trim()).getAddress();
+                    return Arrays.equals(exactBytes, cand);
+                } catch (Exception ignored) {}
+            }
+            return false;
+        }
+    }
+
+    static class CidrMatcher implements TrustedProxyMatcher {
+        private final byte[] networkBytes;
+        private final int prefixBits;
+
+        CidrMatcher(String cidr) throws Exception {
+            String[] parts = cidr.split("/");
+            InetAddress netAddr = InetAddress.getByName(parts[0].trim());
+            this.networkBytes = netAddr.getAddress();
+            this.prefixBits = Integer.parseInt(parts[1].trim());
+        }
+
+        @Override
+        public boolean matches(String ip) {
+            try {
+                InetAddress candidate = InetAddress.getByName(ip.trim());
+                byte[] candBytes = candidate.getAddress();
+                if (candBytes.length != networkBytes.length) {
+                    return false;
+                }
+                int fullBytes = prefixBits / 8;
+                int remainingBits = prefixBits % 8;
+                for (int i = 0; i < fullBytes; i++) {
+                    if (candBytes[i] != networkBytes[i]) {
+                        return false;
+                    }
+                }
+                if (remainingBits > 0) {
+                    int mask = (0xFF << (8 - remainingBits)) & 0xFF;
+                    if ((candBytes[fullBytes] & mask) != (networkBytes[fullBytes] & mask)) {
+                        return false;
+                    }
+                }
+                return true;
+            } catch (Exception e) {
+                return false;
+            }
+        }
     }
 
     private String normalizeIdentifier(String rawIdentifier, String explicitRut) {
