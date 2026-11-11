@@ -97,16 +97,14 @@ public class PropertyController {
                     p.tipo_propiedad, p.estado, p.precio_uf,
                     ROUND(p.precio_uf * COALESCE(uf.valor, 37850), 0) AS precio_clp_estimado,
                     p.m2_util, p.m2_total, p.dormitorios, p.banos, p.estacionamientos,
-                    p.gastos_comunes_clp, p.contribuciones_clp,
+                    p.gastos_comunes_clp,
                     c.nombre AS comuna_nombre, p.barrio, p.direccion_referencial,
                     ST_Y(p.ubicacion::geometry) AS latitud,
                     ST_X(p.ubicacion::geometry) AS longitud,
-                    p.subsidio_ds19, p.subsidio_ds1, p.subsidio_leas_inm,
-                    p.tiene_bodega, p.tiene_piscina, p.tiene_quincho, p.tiene_gimnasio,
-                    p.tiene_estacionamiento_visitas, p.tiene_conserjeria, p.tiene_areas_verdes,
-                    p.tiene_bicicletero, p.tiene_sala_eventos, p.admite_mascotas,
-                    p.tiene_tour_virtual, p.tour_virtual_url, p.tiene_video, p.video_url,
-                    p.verificada, p.imagen_portada_url, p.imagenes_galeria_urls,
+                    p.subsidio_ds19, p.subsidio_ds1,
+                    p.bodegas, p.ano_construccion,
+                    p.destacada, p.tiene_tour_virtual, p.tiene_video,
+                    p.verificada, p.imagen_portada_url,
                     p.publicada_el, p.actualizada_el
                 FROM propiedad p
                 JOIN comuna c ON c.id = p.comuna_id

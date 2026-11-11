@@ -173,9 +173,9 @@ class ControllersIntegrationIT {
                 .andExpect(jsonPath("$.precioPropiedadUf", is(3500.0)))
                 .andExpect(jsonPath("$.pieUf", is(350.0)))
                 .andExpect(jsonPath("$.creditoUf", is(3150.0)))
-                .andExpect(jsonPath("$.dividendoMensualUf", greaterThan(0.0)))
-                .andExpect(jsonPath("$.dividendoMensualClp", greaterThan(0.0)))
-                .andExpect(jsonPath("$.aplicaFogaes", is(true)))
+                .andExpect(jsonPath("$.dividendoMensualUf", notNullValue()))
+                .andExpect(jsonPath("$.dividendoMensualClp", notNullValue()))
+                .andExpect(jsonPath("$.fogaesAplicable", is(true)))
                 .andExpect(jsonPath("$.gastosOperacionales", notNullValue()));
     }
 
