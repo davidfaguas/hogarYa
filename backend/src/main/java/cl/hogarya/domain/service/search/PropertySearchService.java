@@ -4,6 +4,7 @@ import cl.hogarya.domain.model.search.PropertySearchCriteria;
 import cl.hogarya.domain.model.search.PropertySearchResultDto;
 import cl.hogarya.infrastructure.persistence.mapper.PropertySearchMapper;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.core.env.Environment;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -20,6 +21,7 @@ import java.util.Optional;
  *   únicamente si la extensión pgvector instalada es versión >= 0.8.0.
  * - Integra EmbeddingProvider para vectorizar automáticamente consultas en lenguaje natural
  *   sin requerir que la capa superior pase un float[] manualmente.
+ * - Falla obligatoria al iniciar en producción si no existe una implementación real de EmbeddingProvider.
  */
 @Service
 public class PropertySearchService {
@@ -33,15 +35,45 @@ public class PropertySearchService {
     public PropertySearchService(
             PropertySearchMapper propertySearchMapper,
             JdbcClient jdbcClient,
-            EmbeddingProvider embeddingProvider
+            @Autowired(required = false) EmbeddingProvider embeddingProvider,
+            @Autowired(required = false) Environment environment
     ) {
         this.propertySearchMapper = propertySearchMapper;
         this.jdbcClient = jdbcClient;
-        this.embeddingProvider = embeddingProvider != null ? embeddingProvider : new FakeEmbeddingProvider();
+
+        if (embeddingProvider == null) {
+            boolean isProd = false;
+            if (environment != null) {
+                for (String p : environment.getActiveProfiles()) {
+                    if ("prod".equalsIgnoreCase(p) || "production".equalsIgnoreCase(p)) {
+                        isProd = true;
+                        break;
+                    }
+                }
+            }
+            if (isProd) {
+                throw new IllegalStateException(
+                        "Fallo al arrancar en perfil producción: No se ha configurado un proveedor real de EmbeddingProvider. " +
+                        "FakeEmbeddingProvider solo está disponible en perfiles dev y test. " +
+                        "Configure una implementación real conectada al modelo de embeddings."
+                );
+            }
+            this.embeddingProvider = new FakeEmbeddingProvider();
+        } else {
+            this.embeddingProvider = embeddingProvider;
+        }
+    }
+
+    public PropertySearchService(
+            PropertySearchMapper propertySearchMapper,
+            JdbcClient jdbcClient,
+            EmbeddingProvider embeddingProvider
+    ) {
+        this(propertySearchMapper, jdbcClient, embeddingProvider, null);
     }
 
     public PropertySearchService(PropertySearchMapper propertySearchMapper, JdbcClient jdbcClient) {
-        this(propertySearchMapper, jdbcClient, new FakeEmbeddingProvider());
+        this(propertySearchMapper, jdbcClient, new FakeEmbeddingProvider(), null);
     }
 
     /**

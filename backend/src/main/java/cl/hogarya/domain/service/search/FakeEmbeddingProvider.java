@@ -1,5 +1,6 @@
 package cl.hogarya.domain.service.search;
 
+import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 
 import java.nio.charset.StandardCharsets;
@@ -11,8 +12,10 @@ import java.util.Random;
  * Implementación simulada determinista de {@link EmbeddingProvider}.
  * Genera vectores de 768 dimensiones normalizados con norma euclidiana L2 = 1.0,
  * garantizando que el mismo texto siempre genere el mismo embedding para tests reproducibles.
+ * Exclusivamente habilitada en perfiles 'dev' y 'test'.
  */
 @Component
+@Profile({"dev", "test"})
 public class FakeEmbeddingProvider implements EmbeddingProvider {
 
     public static final int VECTOR_DIMENSIONS = 768;

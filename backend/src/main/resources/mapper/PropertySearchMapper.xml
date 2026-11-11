@@ -164,9 +164,24 @@
                 em.nombre AS nombre_estacion,
                 ROUND(ST_Distance(p.ubicacion, em.ubicacion)::numeric, 1)::float8 AS distancia_metros
             FROM (
-                SELECT id 
-                FROM rrf_unificado 
-                ORDER BY rrf_score DESC 
+                SELECT u.id 
+                FROM rrf_unificado u
+                JOIN propiedad p ON p.id = u.id
+                ORDER BY 
+                <choose>
+                    <when test="criteria.sortOption == 'menor_precio'">
+                        p.precio_uf ASC
+                    </when>
+                    <when test="criteria.sortOption == 'mayor_precio'">
+                        p.precio_uf DESC
+                    </when>
+                    <when test="criteria.sortOption == 'mas_recientes'">
+                        p.publicada_el DESC
+                    </when>
+                    <otherwise>
+                        u.rrf_score DESC, p.precio_uf ASC
+                    </otherwise>
+                </choose>
                 LIMIT #{limit} OFFSET #{offset}
             ) u
             JOIN propiedad p ON p.id = u.id

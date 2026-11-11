@@ -72,7 +72,19 @@ class PropertySearchMapperIntegrationIT {
     @Autowired
     private JdbcClient jdbcClient;
 
+    @Autowired
+    private cl.hogarya.domain.service.search.EmbeddingProvider embeddingProvider;
+
     private UUID orgId;
+
+    private String formatVector(float[] vec) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < vec.length; i++) {
+            if (i > 0) sb.append(",");
+            sb.append(vec[i]);
+        }
+        return sb.toString();
+    }
 
     @BeforeEach
     void setUpTestData() {
@@ -131,6 +143,14 @@ class PropertySearchMapperIntegrationIT {
                 ST_SetSRID(ST_MakePoint(-70.5050, -33.3950), 4326)::geography, TRUE
             )
             """).param("orgId", orgId).update();
+
+        // Asignar embeddings generados por EmbeddingProvider a P1 y P2
+        float[] p1Vec = embeddingProvider.generateEmbedding("Hermoso departamento con piscina y quincho cerca del metro");
+        float[] p2Vec = embeddingProvider.generateEmbedding("Moderna casa familiar en San Carlos de Apoquindo");
+        jdbcClient.sql("UPDATE propiedad SET embedding = ('[' || :vec || ']')::vector WHERE id = '11111111-1111-1111-1111-111111111111'::uuid")
+                .param("vec", formatVector(p1Vec)).update();
+        jdbcClient.sql("UPDATE propiedad SET embedding = ('[' || :vec || ']')::vector WHERE id = '22222222-2222-2222-2222-222222222222'::uuid")
+                .param("vec", formatVector(p2Vec)).update();
     }
 
     @Test
@@ -186,5 +206,88 @@ class PropertySearchMapperIntegrationIT {
 
         assertFalse(results.isEmpty(), "Debe encontrar resultados para texto 'piscina conectividad'");
         assertEquals("TEST-PROP-1", results.get(0).codigoPublicacion());
+    }
+
+    @Test
+    @DisplayName("Pgvector: Búsqueda vectorial real de extremo a extremo usando embedding de consulta")
+    void shouldExecuteVectorSearchWithRealEmbeddingToPgVector() {
+        // Generar vector real mediante EmbeddingProvider
+        float[] queryVector = embeddingProvider.generateEmbedding("piscina y quincho departamento luminoso");
+
+        PropertySearchCriteria criteria = new PropertySearchCriteria(
+                "VENTA", null, null, null, null, null, null, null, null,
+                null, null, null, "relevancia"
+        );
+
+        List<PropertySearchResultDto> results = propertySearchService.search(criteria, queryVector, 10, 0);
+
+        assertFalse(results.isEmpty(), "Debe encontrar resultados en pgvector");
+        // El vector de P1 está más cercano semánticamente a 'piscina y quincho departamento luminoso'
+        assertEquals("TEST-PROP-1", results.get(0).codigoPublicacion());
+        assertTrue(results.get(0).rrfScore() > 0.0, "El rrf_score debe ser mayor a 0");
+    }
+
+    @Test
+    @DisplayName("RRF & Metro: Desempate determinista por precio_uf ASC cuando rrf_score es idéntico con metro_detalle")
+    void shouldBreakTieByLowestPriceWhenRrfScoreIsEqualAndRetainMetroDetail() {
+        // Insertar dos propiedades con texto idéntico y mismo vector para garantizar empate estricto de RRF
+        float[] tieVec = embeddingProvider.generateEmbedding("propiedad para test de desempate idéntico");
+        String vecStr = formatVector(tieVec);
+
+        // Propiedad Barata (3100 UF)
+        jdbcClient.sql("""
+            INSERT INTO propiedad (
+                id, codigo_publicacion, organizacion_id, titulo, descripcion, tipo_propiedad, 
+                operacion, estado, precio_uf, m2_util, m2_total, dormitorios, banos, 
+                comuna_id, direccion_referencial, barrio, ubicacion, activo, embedding
+            ) VALUES (
+                '33333333-3333-3333-3333-333333333333'::uuid, 'TIE-CHEAP', :orgId,
+                'Empate departamento identico con jardin', 'Misma descripcion para ambos inmuebles',
+                'DEPARTAMENTO', 'VENTA', 'NUEVA', 3100.00, 60.0, 70.0, 2, 1, 
+                1, 'Av. Test 100', 'Bellavista', 
+                ST_SetSRID(ST_MakePoint(-70.5986, -33.5222), 4326)::geography, TRUE,
+                ('[' || :vec || ']')::vector
+            )
+            """).param("orgId", orgId).param("vec", vecStr).update();
+
+        // Propiedad Cara (4900 UF)
+        jdbcClient.sql("""
+            INSERT INTO propiedad (
+                id, codigo_publicacion, organizacion_id, titulo, descripcion, tipo_propiedad, 
+                operacion, estado, precio_uf, m2_util, m2_total, dormitorios, banos, 
+                comuna_id, direccion_referencial, barrio, ubicacion, activo, embedding
+            ) VALUES (
+                '44444444-4444-4444-4444-444444444444'::uuid, 'TIE-EXPENSIVE', :orgId,
+                'Empate departamento identico con jardin', 'Misma descripcion para ambos inmuebles',
+                'DEPARTAMENTO', 'VENTA', 'NUEVA', 4900.00, 60.0, 70.0, 2, 1, 
+                1, 'Av. Test 200', 'Bellavista', 
+                ST_SetSRID(ST_MakePoint(-70.5986, -33.5222), 4326)::geography, TRUE,
+                ('[' || :vec || ']')::vector
+            )
+            """).param("orgId", orgId).param("vec", vecStr).update();
+
+        PropertySearchCriteria criteria = new PropertySearchCriteria(
+                "VENTA", "DEPARTAMENTO", (short) 1, null, null, null, null, null, null,
+                null, null, "Empate departamento identico", "relevancia"
+        );
+
+        List<PropertySearchResultDto> results = propertySearchService.search(criteria, tieVec, 10, 0);
+
+        assertTrue(results.size() >= 2, "Debe retornar al menos las 2 propiedades empatadas");
+        PropertySearchResultDto first = results.get(0);
+        PropertySearchResultDto second = results.get(1);
+
+        // Validar empate de rrf_score (precisión 1e-5)
+        assertEquals(first.rrfScore(), second.rrfScore(), 0.00001, "Ambas propiedades deben tener RRF score idéntico");
+
+        // Validar desempate determinista por precio_uf ASC: la más barata (3100 UF) aparece primero
+        assertEquals("TIE-CHEAP", first.codigoPublicacion(), "La propiedad de menor precio (3100 UF) debe desempatar primero");
+        assertEquals("TIE-EXPENSIVE", second.codigoPublicacion(), "La propiedad de mayor precio (4900 UF) debe ir en segundo lugar");
+
+        // Validar asociación correcta de metro_detalle para ambas
+        assertNotNull(first.nombreEstacionCercana(), "La primera propiedad debe tener metro_detalle poblado");
+        assertNotNull(second.nombreEstacionCercana(), "La segunda propiedad debe tener metro_detalle poblado");
+        assertEquals("Test Metro A", first.nombreEstacionCercana());
+        assertEquals("Test Metro A", second.nombreEstacionCercana());
     }
 }

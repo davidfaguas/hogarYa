@@ -247,18 +247,35 @@ public class AuthController {
      * Resuelve la dirección IP del cliente de forma segura.
      * Solo confía en la cabecera X-Forwarded-For si el remoteAddr que entrega la petición
      * pertenece a la lista de proxies de confianza configurados.
+     * Recorre la cadena X-Forwarded-For de derecha a izquierda (right-to-left traversal),
+     * seleccionando el último salto no confiable (primer IP no confiable de derecha a izquierda),
+     * mitigando la falsificación de cabeceras mediante prefijos inyectados por el cliente.
      */
     public String resolveClientIp(HttpServletRequest request) {
         if (request == null) return "127.0.0.1";
         String remoteAddr = request.getRemoteAddr() != null ? request.getRemoteAddr().trim() : "127.0.0.1";
 
-        if (isTrustedProxy(remoteAddr)) {
-            String xForwardedFor = request.getHeader("X-Forwarded-For");
-            if (xForwardedFor != null && !xForwardedFor.isBlank()) {
-                String firstHop = xForwardedFor.split(",")[0].trim();
-                if (!firstHop.isBlank()) {
-                    return firstHop;
-                }
+        if (!isTrustedProxy(remoteAddr)) {
+            return remoteAddr;
+        }
+
+        String xForwardedFor = request.getHeader("X-Forwarded-For");
+        if (xForwardedFor == null || xForwardedFor.isBlank()) {
+            return remoteAddr;
+        }
+
+        String[] hops = xForwardedFor.split(",");
+        for (int i = hops.length - 1; i >= 0; i--) {
+            String hop = hops[i].trim();
+            if (!hop.isBlank() && !isTrustedProxy(hop)) {
+                return hop;
+            }
+        }
+
+        for (String hop : hops) {
+            String h = hop.trim();
+            if (!h.isBlank()) {
+                return h;
             }
         }
 

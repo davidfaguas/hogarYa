@@ -24,6 +24,7 @@ hogarya:
     cookie:
       secure: ${HOGARYA_COOKIE_SECURE:true}
       same-site: ${HOGARYA_COOKIE_SAME_SITE:Lax}
+    trusted-proxies: ${HOGARYA_TRUSTED_PROXIES:127.0.0.1,::1,0:0:0:0:0:0:0:1,10.0.0.1}
   outbox:
     interval-ms: 2000
 

@@ -15,6 +15,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.Optional;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -315,5 +316,24 @@ class AuthControllerTest {
         assertEquals(HttpStatus.TOO_MANY_REQUESTS.value(), blocked.getStatusCode().value(),
                 "Tras el tope global de 20 intentos para el identificador, debe responder 429 incluso desde una nueva IP");
         assertTrue(blocked.getBody().mensaje().contains("Demasiados intentos fallidos"));
+    }
+
+    @Test
+    @DisplayName("Seguridad IP: Recorre X-Forwarded-For de derecha a izquierda y descarta IPs falsificadas inyectadas por el cliente")
+    void shouldResolveClientIpFromRightToLeftIgnoringForgedPrefix() {
+        AuthController.UserLookup emptyLookup = identifier -> Optional.empty();
+        Set<String> trusted = Set.of("127.0.0.1", "::1", "10.0.0.1", "10.0.0.2");
+        AuthController authController = AuthController.forTestingWithClock(
+                tokenService, passwordEncoder, emptyLookup, true, "Strict", Clock.systemUTC(), trusted
+        );
+
+        MockHttpServletRequest request = new MockHttpServletRequest();
+        request.setRemoteAddr("10.0.0.1"); // Inmediato: proxy confiable
+        // Cadena falsificada: cliente real (198.51.100.25) inyectó "203.0.113.195", luego pasó por proxy "10.0.0.2"
+        request.addHeader("X-Forwarded-For", "203.0.113.195, 198.51.100.25, 10.0.0.2");
+
+        String resolved = authController.resolveClientIp(request);
+        assertEquals("198.51.100.25", resolved,
+                "Debe resolver 198.51.100.25 ignorando el prefijo falso 203.0.113.195 y saltando el proxy confiable 10.0.0.2");
     }
 }
