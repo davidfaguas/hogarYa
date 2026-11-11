@@ -570,10 +570,10 @@ class ControllersIntegrationIT {
                 INSERT INTO propiedad (
                     id, codigo_publicacion, organizacion_id, titulo, descripcion, tipo_propiedad, 
                     operacion, estado, precio_uf, m2_util, m2_total, dormitorios, banos, 
-                    comuna_id, direccion_referencial, activo, publicada_el, indexando_desde, embedding
+                    comuna_id, direccion_referencial, ubicacion, activo, publicada_el, indexando_desde, embedding
                 ) VALUES (
                     :id, :code, :orgId, 'Propiedad Concurrente', 'Test conc', 'CASA',
-                    'VENTA', 'USADA', 2500, 70, 90, 2, 1, 1, 'Av. Libertador 123', TRUE, NOW(), NULL, NULL
+                    'VENTA', 'USADA', 2500, 70, 90, 2, 1, 1, 'Av. Libertador 123', ST_SetSRID(ST_MakePoint(-70.6100, -33.4250), 4326), TRUE, NOW(), NULL, NULL
                 )
                 """)
                 .param("id", pId)
@@ -602,10 +602,10 @@ class ControllersIntegrationIT {
             INSERT INTO propiedad (
                 id, codigo_publicacion, organizacion_id, titulo, descripcion, tipo_propiedad, 
                 operacion, estado, precio_uf, m2_util, m2_total, dormitorios, banos, 
-                comuna_id, direccion_referencial, activo, publicada_el, indexando_desde, embedding
+                comuna_id, direccion_referencial, ubicacion, activo, publicada_el, indexando_desde, embedding
             ) VALUES (
                 :id, :code, :orgId, 'Propiedad Reclamo Expirado', 'Test expiración', 'CASA',
-                'VENTA', 'USADA', 2500, 70, 90, 2, 1, 1, 'Av. Apoquindo 999', TRUE, NOW() - INTERVAL '15 minutes', NOW() - INTERVAL '10 minutes', NULL
+                'VENTA', 'USADA', 2500, 70, 90, 2, 1, 1, 'Av. Apoquindo 999', ST_SetSRID(ST_MakePoint(-70.6100, -33.4250), 4326), TRUE, NOW() - INTERVAL '15 minutes', NOW() - INTERVAL '10 minutes', NULL
             )
             """)
             .param("id", expiredId)
