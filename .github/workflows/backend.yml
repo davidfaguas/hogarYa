@@ -44,7 +44,7 @@ jobs:
         run: |
           docker build -t hogarya-bench-db backend -f backend/Dockerfile.test-db
 
-      - name: Start PostgreSQL container (Limited Resources: 1 CPU / 1 GB)
+      - name: "Start PostgreSQL container (Limited Resources: 1 CPU / 1 GB)"
         run: |
           docker run -d --name pg-bench \
             --cpus=1.0 \
