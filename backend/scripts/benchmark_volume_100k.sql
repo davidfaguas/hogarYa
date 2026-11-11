@@ -369,7 +369,7 @@ BEGIN
         JOIN propiedad p ON p.id = u.id
         JOIN estacion_metro em ON ST_DWithin(p.ubicacion, em.ubicacion, 1000)
         WHERE em.activo = TRUE
-        ORDER BY p.id, ST_Distance(p.ubicacion, em.ubicacion) ASC
+        ORDER BY p.id, ST_Distance(p.ubicacion, em.ubicacion) ASC, em.id ASC
     )
     SELECT 
         p.id,
