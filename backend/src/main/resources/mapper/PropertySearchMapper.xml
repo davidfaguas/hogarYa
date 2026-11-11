@@ -102,7 +102,7 @@
                 <when test="criteria.rawQuery != null and criteria.rawQuery != ''">
                     SELECT 
                         p.id,
-                        ROW_NUMBER() OVER (
+                        DENSE_RANK() OVER (
                             ORDER BY (
                                 ts_rank_cd(p.search_vector, websearch_to_tsquery('spanish', public.immutable_unaccent(#{criteria.rawQuery}))) * 0.7 +
                                 similarity(p.titulo, #{criteria.rawQuery}) * 0.3
@@ -134,7 +134,7 @@
                 <when test="embeddingVector != null">
                     SELECT 
                         p.id,
-                        ROW_NUMBER() OVER (
+                        DENSE_RANK() OVER (
                             ORDER BY p.embedding &lt;=&gt; #{embeddingVector, jdbcType=OTHER, typeHandler=cl.hogarya.infrastructure.persistence.handler.PgVectorTypeHandler} ASC
                         ) AS r_vec
                     FROM propiedad p

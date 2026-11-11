@@ -323,7 +323,7 @@ BEGIN
         LIMIT 1
     ),
     top_vec AS (
-        SELECT p.id, ROW_NUMBER() OVER (ORDER BY p.embedding <=> '$q$ || v_qvec || $q$'::vector(768)) as r_vec
+        SELECT p.id, DENSE_RANK() OVER (ORDER BY p.embedding <=> '$q$ || v_qvec || $q$'::vector(768)) as r_vec
         FROM propiedad p
         WHERE p.activo = true
           AND p.operacion = 'VENTA'
@@ -335,7 +335,7 @@ BEGIN
         LIMIT 200
     ),
     top_fts AS (
-        SELECT p.id, ROW_NUMBER() OVER (ORDER BY ts_rank_cd(p.search_vector, websearch_to_tsquery('spanish', 'piscina metro')) DESC) as r_fts
+        SELECT p.id, DENSE_RANK() OVER (ORDER BY ts_rank_cd(p.search_vector, websearch_to_tsquery('spanish', 'piscina metro')) DESC) as r_fts
         FROM propiedad p
         WHERE p.activo = true
           AND p.operacion = 'VENTA'
