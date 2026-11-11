@@ -557,4 +557,153 @@ class ControllersIntegrationIT {
         }
         Files.write(Path.of("target", "openapi.json"), openApiJson);
     }
+
+    @Test
+    @DisplayName("Backfill Concurrente: Reclamo atómico con SKIP LOCKED y caducidad de reclamo")
+    void shouldSupportConcurrentBackfillClaimingWithSkipLockedAndExpiration() throws Exception {
+        UUID orgId = UUID.fromString("00000000-0000-0000-0000-000000000001");
+        List<UUID> insertedIds = new java.util.ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            UUID pId = UUID.randomUUID();
+            insertedIds.add(pId);
+            jdbcClient.sql("""
+                INSERT INTO propiedad (
+                    id, codigo_publicacion, organizacion_id, titulo, descripcion, tipo_propiedad, 
+                    operacion, estado, precio_uf, m2_util, m2_total, dormitorios, banos, 
+                    comuna_id, activo, publicada_el, indexando_desde, embedding
+                ) VALUES (
+                    :id, :code, :orgId, 'Propiedad Concurrente', 'Test conc', 'CASA',
+                    'VENTA', 'USADA', 2500, 70, 90, 2, 1, 1, TRUE, NOW(), NULL, NULL
+                )
+                """)
+                .param("id", pId)
+                .param("code", "PROP-CONC-" + pId.toString().substring(0, 6))
+                .param("orgId", orgId)
+                .update();
+        }
+
+        // Dos hilos concurrentes reclamando lotes
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        java.util.concurrent.Future<List<UUID>> future1 = pool.submit(() -> propertyIndexingService.claimBatchForIndexing(5, 5));
+        java.util.concurrent.Future<List<UUID>> future2 = pool.submit(() -> propertyIndexingService.claimBatchForIndexing(5, 5));
+
+        List<UUID> claimed1 = future1.get(5, java.util.concurrent.TimeUnit.SECONDS);
+        List<UUID> claimed2 = future2.get(5, java.util.concurrent.TimeUnit.SECONDS);
+        pool.shutdown();
+
+        org.junit.jupiter.api.Assertions.assertFalse(claimed1.isEmpty(), "Instancia 1 debe reclamar elementos");
+        org.junit.jupiter.api.Assertions.assertFalse(claimed2.isEmpty(), "Instancia 2 debe reclamar elementos");
+        org.junit.jupiter.api.Assertions.assertTrue(java.util.Collections.disjoint(claimed1, claimed2),
+                "Las instancias concurrentes no deben reclamar las mismas propiedades");
+
+        // Simular un reclamo expirado (indexando_desde hace 10 minutos con vencimiento a 5 minutos)
+        UUID expiredId = UUID.randomUUID();
+        jdbcClient.sql("""
+            INSERT INTO propiedad (
+                id, codigo_publicacion, organizacion_id, titulo, descripcion, tipo_propiedad, 
+                operacion, estado, precio_uf, m2_util, m2_total, dormitorios, banos, 
+                comuna_id, activo, publicada_el, indexando_desde, embedding
+            ) VALUES (
+                :id, :code, :orgId, 'Propiedad Reclamo Expirado', 'Test expiración', 'CASA',
+                'VENTA', 'USADA', 2500, 70, 90, 2, 1, 1, TRUE, NOW() - INTERVAL '15 minutes', NOW() - INTERVAL '10 minutes', NULL
+            )
+            """)
+            .param("id", expiredId)
+            .param("code", "PROP-EXP-" + expiredId.toString().substring(0, 6))
+            .param("orgId", orgId)
+            .update();
+
+        List<UUID> reclaimed = propertyIndexingService.claimBatchForIndexing(1, 5);
+        org.junit.jupiter.api.Assertions.assertTrue(reclaimed.contains(expiredId),
+                "El reclamo vencido debe ser retomado por claimBatchForIndexing");
+    }
+
+    @Test
+    @DisplayName("Particulares: Registro con organización tipo PARTICULAR y publicación solo en la propia")
+    void shouldRegisterParticularUserAndEnforceSingleOrganizationOwnership() throws Exception {
+        String rutParticular = "11111112-K";
+        String emailParticular = "particular.test." + UUID.randomUUID().toString().substring(0, 8) + "@hogarya.cl";
+
+        String registerJson = String.format("""
+                {
+                    "email": "%s",
+                    "password": "PasswordSegura2026!",
+                    "nombres": "Pedro",
+                    "apellidos": "Particular",
+                    "rut": "%s",
+                    "telefono": "+56987654321"
+                }
+                """, emailParticular, rutParticular);
+
+        // 1. Registro exitoso -> 201 Created y Set-Cookie
+        var registerResult = mockMvc.perform(post("/api/v1/auth/registro")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(registerJson))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.usuarioId", notNullValue()))
+                .andExpect(jsonPath("$.organizacionId", notNullValue()))
+                .andExpect(jsonPath("$.rol", is("ROLE_PARTICULAR")))
+                .andExpect(jsonPath("$.tipoOrganizacion", is("PARTICULAR")))
+                .andReturn();
+
+        Cookie particularCookie = registerResult.getResponse().getCookie("HOGARYA_SESSION");
+        org.junit.jupiter.api.Assertions.assertNotNull(particularCookie);
+
+        // 2. Verificar que la organización en BD es de tipo PARTICULAR
+        String orgTipo = jdbcClient.sql("""
+                SELECT o.tipo 
+                FROM usuario u 
+                JOIN organizacion o ON u.organizacion_id = o.id 
+                WHERE LOWER(u.email) = :email
+                """)
+                .param("email", emailParticular)
+                .query(String.class)
+                .single();
+        org.junit.jupiter.api.Assertions.assertEquals("PARTICULAR", orgTipo);
+
+        // 3. El particular publica una nueva propiedad en su propia organización -> 201 Created
+        String newPropJson = """
+                {
+                    "titulo": "Casa acogedora particular en La Reina",
+                    "descripcion": "Vendo casa familiar directamente sin intermediarios",
+                    "tipoPropiedad": "CASA",
+                    "operacion": "VENTA",
+                    "precioUf": 7200.00,
+                    "m2Util": 120.0,
+                    "m2Total": 180.0,
+                    "dormitorios": 3,
+                    "banos": 2,
+                    "comunaId": 1,
+                    "direccionReferencial": "Príncipe de Gales 7000",
+                    "barrio": "La Reina",
+                    "latitud": -33.4350,
+                    "longitud": -70.5500
+                }
+                """;
+
+        var publishResult = mockMvc.perform(post("/api/v1/propiedades")
+                        .with(csrf())
+                        .cookie(particularCookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(newPropJson))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.id", notNullValue()))
+                .andReturn();
+
+        String propIdStr = com.jayway.jsonpath.JsonPath.read(publishResult.getResponse().getContentAsString(), "$.id");
+        UUID particularPropId = UUID.fromString(propIdStr);
+
+        // 4. El particular intenta publicar propiedad de OTRA organización -> 403 Forbidden
+        mockMvc.perform(post("/api/v1/propiedades/" + testPropId + "/publicar")
+                        .with(csrf())
+                        .cookie(particularCookie))
+                .andExpect(status().isForbidden());
+
+        // 5. El particular puede publicar su propia propiedad -> 200 OK
+        mockMvc.perform(post("/api/v1/propiedades/" + particularPropId + "/publicar")
+                        .with(csrf())
+                        .cookie(particularCookie))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id", is(particularPropId.toString())));
+    }
 }

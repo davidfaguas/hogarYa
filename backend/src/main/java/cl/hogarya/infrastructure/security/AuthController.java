@@ -8,6 +8,7 @@ import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.env.Environment;
@@ -58,6 +59,7 @@ public class AuthController {
     private final String dummyPasswordHash;
     private final Clock clock;
     private final List<TrustedProxyMatcher> trustedProxyMatchers;
+    private final JdbcClient jdbcClient;
 
     private final ConcurrentMap<String, AttemptInfo> ipAttempts = new ConcurrentHashMap<>();
     private final ConcurrentMap<String, AttemptInfo> globalUserAttempts = new ConcurrentHashMap<>();
@@ -95,7 +97,8 @@ public class AuthController {
                 secureCookie,
                 sameSite,
                 Clock.systemUTC(),
-                parseTrustedProxies(validateTrustedProxiesConfig(trustedProxiesConfig, env))
+                parseTrustedProxies(validateTrustedProxiesConfig(trustedProxiesConfig, env)),
+                jdbcClient
         );
     }
 
@@ -119,7 +122,7 @@ public class AuthController {
     ) {
         return new AuthController(
                 jwtTokenService, passwordEncoder, userLookup, secureCookie, sameSite,
-                Clock.systemUTC(), parseTrustedProxies("127.0.0.1,::1,10.0.0.1")
+                Clock.systemUTC(), parseTrustedProxies("127.0.0.1,::1,10.0.0.1"), null
         );
     }
 
@@ -133,7 +136,7 @@ public class AuthController {
     ) {
         return new AuthController(
                 jwtTokenService, passwordEncoder, userLookup, secureCookie, sameSite, clock,
-                parseTrustedProxies("127.0.0.1,::1,10.0.0.1")
+                parseTrustedProxies("127.0.0.1,::1,10.0.0.1"), null
         );
     }
 
@@ -152,7 +155,7 @@ public class AuthController {
                 matchers.add(createMatcher(p));
             }
         }
-        return new AuthController(jwtTokenService, passwordEncoder, userLookup, secureCookie, sameSite, clock, matchers);
+        return new AuthController(jwtTokenService, passwordEncoder, userLookup, secureCookie, sameSite, clock, matchers, null);
     }
 
     private AuthController(
@@ -162,7 +165,8 @@ public class AuthController {
             boolean secureCookie,
             String sameSite,
             Clock clock,
-            List<TrustedProxyMatcher> trustedProxyMatchers
+            List<TrustedProxyMatcher> trustedProxyMatchers,
+            JdbcClient jdbcClient
     ) {
         this.jwtTokenService = jwtTokenService;
         this.passwordEncoder = passwordEncoder;
@@ -172,10 +176,137 @@ public class AuthController {
         this.clock = clock;
         this.trustedProxyMatchers = trustedProxyMatchers != null ? trustedProxyMatchers : Collections.emptyList();
         this.dummyPasswordHash = passwordEncoder.encode("hogarya-timing-mitigation-dummy-password");
+        this.jdbcClient = jdbcClient;
     }
 
     public String getDummyPasswordHash() {
         return dummyPasswordHash;
+    }
+
+    public record RegisterRequest(
+            @Schema(description = "Email del usuario", example = "particular@hogarya.cl") String email,
+            @Schema(description = "Contraseña en texto plano (mínimo 8 caracteres)", example = "passwordSegura123!") String password,
+            @Schema(description = "Nombres del particular", example = "Pedro") String nombres,
+            @Schema(description = "Apellidos del particular", example = "Gómez") String apellidos,
+            @Schema(description = "RUT chileno del particular", example = "11.111.112-K") String rut,
+            @Schema(description = "Teléfono de contacto opcional", example = "+56912345678") String telefono
+    ) {}
+
+    public record RegisterResponse(
+            @Schema(description = "Identificador único del usuario creado") UUID usuarioId,
+            @Schema(description = "Identificador único de la organización PARTICULAR creada") UUID organizacionId,
+            @Schema(description = "Email registrado") String email,
+            @Schema(description = "RUT canónico chileno") String rut,
+            @Schema(description = "Rol asignado al usuario") String rol,
+            @Schema(description = "Tipo de organización asignada") String tipoOrganizacion
+    ) {}
+
+    @PostMapping("/registro")
+    @Operation(summary = "Registro de nuevo usuario particular", description = "Crea automáticamente una organización de tipo PARTICULAR y el usuario asociado con ROLE_PARTICULAR, emitiendo cookie de sesión")
+    @ApiResponses({
+            @ApiResponse(responseCode = "201", description = "Usuario particular registrado exitosamente con sesión iniciada",
+                    content = @Content(schema = @Schema(implementation = RegisterResponse.class))),
+            @ApiResponse(responseCode = "400", description = "Datos incompletos o RUT chileno inválido"),
+            @ApiResponse(responseCode = "409", description = "El email o RUT ya se encuentra registrado")
+    })
+    public ResponseEntity<?> register(
+            @RequestBody RegisterRequest req
+    ) {
+        if (jdbcClient == null) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", "Servicio de base de datos no disponible para registro"));
+        }
+        if (req == null || req.email() == null || req.email().isBlank()
+                || req.password() == null || req.password().length() < 8
+                || req.nombres() == null || req.nombres().isBlank()
+                || req.apellidos() == null || req.apellidos().isBlank()
+                || req.rut() == null || req.rut().isBlank()) {
+            return ResponseEntity.badRequest()
+                    .body(Map.of("error", "Todos los campos obligatorios deben estar presentes (contraseña mínima de 8 caracteres)"));
+        }
+        if (!ChileanRut.isValid(req.rut())) {
+            return ResponseEntity.badRequest()
+                    .body(Map.of("error", "El RUT provisto no es un RUT chileno válido"));
+        }
+
+        String canonicalRut = ChileanRut.of(req.rut()).toCanonicalString();
+        String email = req.email().trim().toLowerCase();
+
+        // Verificar unicidad de email y RUT
+        Integer existing = jdbcClient.sql("""
+                SELECT COUNT(*) FROM usuario WHERE LOWER(email) = :email OR rut = :rut
+                """)
+                .param("email", email)
+                .param("rut", canonicalRut)
+                .query(Integer.class)
+                .single();
+
+        if (existing != null && existing > 0) {
+            return ResponseEntity.status(HttpStatus.CONFLICT)
+                    .body(Map.of("error", "El email o RUT ya se encuentra registrado en el sistema"));
+        }
+
+        UUID orgId = UUID.randomUUID();
+        UUID userId = UUID.randomUUID();
+        String fullName = (req.nombres().trim() + " " + req.apellidos().trim()).trim();
+        String phone = (req.telefono() != null && !req.telefono().isBlank()) ? req.telefono().trim() : "+56900000000";
+
+        // 1. Insertar organización tipo PARTICULAR
+        jdbcClient.sql("""
+                INSERT INTO organizacion (
+                    id, rut_empresa, razon_social, nombre_fantasia, tipo,
+                    telefono_contacto, whatsapp_contacto, email_contacto
+                ) VALUES (
+                    :id, :rut, :razon, :fantasia, 'PARTICULAR',
+                    :tel, :tel, :email
+                )
+                """)
+                .param("id", orgId)
+                .param("rut", canonicalRut)
+                .param("razon", fullName)
+                .param("fantasia", fullName)
+                .param("tel", phone)
+                .param("email", email)
+                .update();
+
+        // 2. Insertar usuario con ROLE_PARTICULAR
+        String passHash = passwordEncoder.encode(req.password());
+        jdbcClient.sql("""
+                INSERT INTO usuario (
+                    id, rut, email, password_hash, nombres, apellidos, rol, organizacion_id, activo
+                ) VALUES (
+                    :id, :rut, :email, :hash, :nombres, :apellidos, 'ROLE_PARTICULAR', :orgId, TRUE
+                )
+                """)
+                .param("id", userId)
+                .param("rut", canonicalRut)
+                .param("email", email)
+                .param("hash", passHash)
+                .param("nombres", req.nombres().trim())
+                .param("apellidos", req.apellidos().trim())
+                .param("orgId", orgId)
+                .update();
+
+        // 3. Emitir cookie JWT de sesión
+        String token = jwtTokenService.generateToken(email, canonicalRut, List.of("ROLE_PARTICULAR"));
+        ResponseCookie cookie = ResponseCookie.from(JwtAuthenticationFilter.COOKIE_NAME, token)
+                .httpOnly(true)
+                .secure(secureCookie)
+                .sameSite(sameSite)
+                .path("/")
+                .maxAge(Duration.ofMinutes(60))
+                .build();
+
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .header(HttpHeaders.SET_COOKIE, cookie.toString())
+                .body(new RegisterResponse(
+                        userId,
+                        orgId,
+                        email,
+                        canonicalRut,
+                        "ROLE_PARTICULAR",
+                        "PARTICULAR"
+                ));
     }
 
     public record LoginRequest(

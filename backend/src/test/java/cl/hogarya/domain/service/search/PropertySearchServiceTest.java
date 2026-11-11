@@ -136,14 +136,12 @@ class PropertySearchServiceTest {
         io.micrometer.core.instrument.simple.SimpleMeterRegistry meterRegistry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
 
         when(mockJdbcClient.sql(anyString()).update()).thenReturn(1);
-        when(slowProvider.generateEmbedding(anyString())).thenAnswer(invocation -> {
-            Thread.sleep(150); // Simula demora superior al timeout configurado (50 ms)
-            return new float[768];
-        });
+        when(slowProvider.generateEmbedding(anyString())).thenThrow(
+                new org.springframework.web.client.ResourceAccessException("Read timed out", new java.net.SocketTimeoutException("Read timed out"))
+        );
 
-        // Configurar timeout corto de 50 ms
         PropertySearchService service = new PropertySearchService(
-                mockMapper, mockJdbcClient, slowProvider, null, meterRegistry, 50L
+                mockMapper, mockJdbcClient, slowProvider, null, meterRegistry
         );
 
         PropertySearchCriteria criteria = new PropertySearchCriteria(

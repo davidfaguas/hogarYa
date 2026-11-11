@@ -139,6 +139,7 @@ public class PropertyIndexingService {
             int updated = jdbcClient.sql("""
                     UPDATE propiedad
                     SET embedding = ('[' || :vec || ']')::vector,
+                        indexando_desde = NULL,
                         actualizada_el = NOW()
                     WHERE id = :id
                     """)
@@ -199,37 +200,66 @@ public class PropertyIndexingService {
     }
 
     /**
+     * Reclama de forma atómica un lote de propiedades para indexación con marca de tiempo indexando_desde.
+     * Utiliza UPDATE ... SET indexando_desde = NOW() WHERE id IN (SELECT ... FOR UPDATE SKIP LOCKED) RETURNING id
+     * dentro de una transacción corta para evitar bloqueos prolongados y permitir concurrencia segura entre réplicas.
+     * Soporta caducidad del reclamo (expirationMinutes) para retomar propiedades que hayan quedado colgadas.
+     *
+     * @param batchSize Tamaño del lote a reclamar
+     * @param expirationMinutes Minutos tras los cuales un reclamo previo no completado se considera vencido
+     * @return Lista de UUIDs de propiedades reclamadas exclusivamente por esta instancia
+     */
+    @Transactional
+    public List<UUID> claimBatchForIndexing(int batchSize, int expirationMinutes) {
+        int limit = Math.max(1, Math.min(batchSize, 500));
+        int expiration = Math.max(1, expirationMinutes);
+
+        return jdbcClient.sql("""
+                UPDATE propiedad
+                SET indexando_desde = NOW()
+                WHERE id IN (
+                    SELECT id 
+                    FROM propiedad 
+                    WHERE embedding IS NULL 
+                      AND activo = TRUE 
+                      AND (indexando_desde IS NULL OR indexando_desde < NOW() - make_interval(mins => :expiration))
+                    ORDER BY publicada_el ASC 
+                    LIMIT :limit
+                    FOR UPDATE SKIP LOCKED
+                )
+                RETURNING id
+                """)
+                .param("expiration", expiration)
+                .param("limit", limit)
+                .query((rs, rowNum) -> (UUID) rs.getObject("id"))
+                .list();
+    }
+
+    /**
      * Job de relleno (backfill) para propiedades existentes que aún no poseen embedding semántico.
-     * Utiliza FOR UPDATE SKIP LOCKED dentro de transacción para permitir ejecución concurrente segura
-     * entre múltiples réplicas o instancias del backend sin contención de bloqueos ni duplicación de trabajo.
+     * Las llamadas al proveedor de embeddings se realizan FUERA de la transacción de la base de datos
+     * para no retener conexiones ni bloqueos durante la latencia de red externa.
      *
      * @param batchSize Número máximo de propiedades a procesar en esta tanda
      * @return Número de propiedades indexadas con éxito
      */
-    @Transactional
     public int backfillMissingEmbeddings(int batchSize) {
         if (embeddingProvider == null) {
             log.warn("Backfill abortado: EmbeddingProvider no disponible");
             return 0;
         }
 
-        int limit = Math.max(1, Math.min(batchSize, 500));
-        List<UUID> missingIds = jdbcClient.sql("""
-                SELECT id 
-                FROM propiedad 
-                WHERE embedding IS NULL AND activo = TRUE 
-                ORDER BY publicada_el ASC 
-                LIMIT :limit
-                FOR UPDATE SKIP LOCKED
-                """)
-                .param("limit", limit)
-                .query((rs, rowNum) -> (UUID) rs.getObject("id"))
-                .list();
+        // Reclamo atómico en transacción corta (5 minutos de expiración de reclamo)
+        List<UUID> claimedIds = claimBatchForIndexing(batchSize, 5);
+        if (claimedIds.isEmpty()) {
+            return 0;
+        }
 
-        log.info("Iniciando backfill de embeddings para {} propiedades pendientes (límite batch: {})", missingIds.size(), limit);
+        log.info("Iniciando backfill de embeddings para {} propiedades reclamadas (límite batch: {})", claimedIds.size(), batchSize);
         int successCount = 0;
 
-        for (UUID id : missingIds) {
+        // Invocación al proveedor de embeddings FUERA de transacción
+        for (UUID id : claimedIds) {
             boolean ok = indexProperty(id);
             if (ok) {
                 successCount++;
@@ -243,7 +273,7 @@ public class PropertyIndexingService {
             }
         }
 
-        log.info("Backfill completado: {}/{} propiedades indexadas con éxito", successCount, missingIds.size());
+        log.info("Backfill completado: {}/{} propiedades indexadas con éxito", successCount, claimedIds.size());
         return successCount;
     }
 

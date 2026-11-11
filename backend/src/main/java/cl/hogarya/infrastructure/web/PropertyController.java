@@ -194,7 +194,8 @@ public class PropertyController {
         boolean isPublisherRole = authentication.getAuthorities().stream()
                 .anyMatch(a -> "ROLE_ADMIN".equals(a.getAuthority())
                         || "ROLE_CORREDOR".equals(a.getAuthority())
-                        || "ROLE_INMOBILIARIA".equals(a.getAuthority()));
+                        || "ROLE_INMOBILIARIA".equals(a.getAuthority())
+                        || "ROLE_PARTICULAR".equals(a.getAuthority()));
 
         if (!isPublisherRole) {
             return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
@@ -300,7 +301,8 @@ public class PropertyController {
         boolean isPublisherRole = authentication.getAuthorities().stream()
                 .anyMatch(a -> "ROLE_ADMIN".equals(a.getAuthority())
                         || "ROLE_CORREDOR".equals(a.getAuthority())
-                        || "ROLE_INMOBILIARIA".equals(a.getAuthority()));
+                        || "ROLE_INMOBILIARIA".equals(a.getAuthority())
+                        || "ROLE_PARTICULAR".equals(a.getAuthority()));
 
         if (!isPublisherRole) {
             return ResponseEntity.status(HttpStatus.FORBIDDEN).build();

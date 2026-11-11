@@ -39,6 +39,14 @@ jobs:
           path: backend/target/openapi.json
           if-no-files-found: error
 
+      - name: Upload Failsafe Integration Reports Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failsafe-integration-reports
+          path: backend/target/failsafe-reports/
+          if-no-files-found: ignore
+
   benchmark:
     name: Benchmark 100k & HNSW Fidelity Artifact
     runs-on: ubuntu-latest
@@ -62,7 +70,7 @@ jobs:
             -p 5432:5432 hogarya-bench-db
           docker exec pg-bench sh -c 'until psql -U hogarya_app -d hogarya_db -c "SELECT 1" >/dev/null 2>&1; do sleep 1; done'
 
-      - name: Apply Flyway Migrations (V1, V2_1, V2_2, V2_3, V2_4, V2_5)
+      - name: Apply Flyway Migrations (V1, V2_1, V2_2, V2_3, V2_4, V2_5, V2_6)
         run: |
           docker exec -i pg-bench psql -U hogarya_app -d hogarya_db < backend/src/main/resources/db/migration/V1__initial_schema.sql
           docker exec -i pg-bench psql -U hogarya_app -d hogarya_db < backend/src/main/resources/db/migration/V2_1__seed_territorio_metro.sql
@@ -70,6 +78,7 @@ jobs:
           docker exec -i pg-bench psql -U hogarya_app -d hogarya_db < backend/src/main/resources/db/migration/V2_3__seed_pendiente_verificar.sql
           docker exec -i pg-bench psql -U hogarya_app -d hogarya_db < backend/src/main/resources/db/migration/V2_4__create_favorito_table.sql
           docker exec -i pg-bench psql -U hogarya_app -d hogarya_db < backend/src/main/resources/db/migration/V2_5__idx_propiedad_comuna_op_tipo_precio.sql
+          docker exec -i pg-bench psql -U hogarya_app -d hogarya_db < backend/src/main/resources/db/migration/V2_6__add_indexando_desde_to_propiedad.sql
 
       - name: Run 100k Volume Benchmark & HNSW Fidelity Analysis
         run: |

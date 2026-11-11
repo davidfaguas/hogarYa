@@ -59,7 +59,11 @@ public class GeminiEmbeddingProvider implements EmbeddingProvider {
         this.baseUrl = (baseUrl != null && !baseUrl.isBlank()) ? baseUrl.trim() : DEFAULT_BASE_URL;
 
         RestClient.Builder builder = restClientBuilder != null ? restClientBuilder : RestClient.builder();
-        this.restClient = builder.baseUrl(this.baseUrl).build();
+        org.springframework.http.client.SimpleClientHttpRequestFactory requestFactory =
+                new org.springframework.http.client.SimpleClientHttpRequestFactory();
+        requestFactory.setConnectTimeout(java.time.Duration.ofMillis(150));
+        requestFactory.setReadTimeout(java.time.Duration.ofMillis(200));
+        this.restClient = builder.baseUrl(this.baseUrl).requestFactory(requestFactory).build();
     }
 
     /**

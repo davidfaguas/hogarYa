@@ -45,8 +45,6 @@ public class PropertySearchService {
     private volatile Boolean supportsIterativeScan = null;
 
     private final QueryEmbeddingLruCache queryEmbeddingCache;
-    private final long embeddingTimeoutMs;
-    private final ExecutorService embeddingExecutor;
 
     private final AtomicLong cacheHitCount = new AtomicLong(0);
     private final AtomicLong cacheMissCount = new AtomicLong(0);
@@ -109,13 +107,7 @@ public class PropertySearchService {
     ) {
         this.propertySearchMapper = propertySearchMapper;
         this.jdbcClient = jdbcClient;
-        this.embeddingTimeoutMs = 2000L;
         this.queryEmbeddingCache = new QueryEmbeddingLruCache(1000);
-        this.embeddingExecutor = Executors.newCachedThreadPool(r -> {
-            Thread t = new Thread(r, "query-embedding-timeout-worker");
-            t.setDaemon(true);
-            return t;
-        });
 
         if (embeddingProvider == null) {
             boolean isProd = false;
@@ -145,22 +137,26 @@ public class PropertySearchService {
             JdbcClient jdbcClient,
             EmbeddingProvider embeddingProvider,
             Environment environment,
-            MeterRegistry meterRegistry,
-            long embeddingTimeoutMs
+            MeterRegistry meterRegistry
     ) {
         this.propertySearchMapper = propertySearchMapper;
         this.jdbcClient = jdbcClient;
-        this.embeddingTimeoutMs = embeddingTimeoutMs > 0 ? embeddingTimeoutMs : 2000L;
         this.queryEmbeddingCache = new QueryEmbeddingLruCache(1000);
-        this.embeddingExecutor = Executors.newCachedThreadPool(r -> {
-            Thread t = new Thread(r, "query-embedding-timeout-worker");
-            t.setDaemon(true);
-            return t;
-        });
         this.embeddingProvider = embeddingProvider != null ? embeddingProvider : new FakeEmbeddingProvider();
         if (meterRegistry != null) {
             setMeterRegistry(meterRegistry);
         }
+    }
+
+    public PropertySearchService(
+            PropertySearchMapper propertySearchMapper,
+            JdbcClient jdbcClient,
+            EmbeddingProvider embeddingProvider,
+            Environment environment,
+            MeterRegistry meterRegistry,
+            long embeddingTimeoutMs
+    ) {
+        this(propertySearchMapper, jdbcClient, embeddingProvider, environment, meterRegistry);
     }
 
     @Autowired(required = false)
@@ -214,21 +210,23 @@ public class PropertySearchService {
             return null;
         }
 
-        Future<float[]> future = embeddingExecutor.submit(() -> embeddingProvider.generateEmbedding(rawQuery));
         try {
-            float[] vector = future.get(embeddingTimeoutMs, TimeUnit.MILLISECONDS);
+            float[] vector = embeddingProvider.generateEmbedding(rawQuery);
             if (vector != null) {
                 queryEmbeddingCache.put(cacheKey, vector);
             }
             return vector;
-        } catch (TimeoutException te) {
-            future.cancel(true);
+        } catch (org.springframework.web.client.ResourceAccessException rae) {
             recordTimeout();
             recordFallbackText();
-            log.warn("Timeout ({} ms) al generar embedding para consulta '{}'. Retorno a búsqueda exclusiva por texto.",
-                    embeddingTimeoutMs, rawQuery);
+            log.warn("Timeout o fallo de conexión en cliente HTTP al generar embedding para '{}': {}. Fallback a búsqueda solo texto.",
+                    rawQuery, rae.getMessage());
             return null;
         } catch (Exception ex) {
+            if (ex instanceof java.net.SocketTimeoutException
+                    || (ex.getCause() != null && ex.getCause() instanceof java.net.SocketTimeoutException)) {
+                recordTimeout();
+            }
             recordFallbackText();
             log.warn("Error generando embedding para consulta '{}': {}. Fallback a búsqueda solo texto.",
                     rawQuery, ex.getMessage());
