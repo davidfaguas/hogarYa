@@ -4,6 +4,7 @@ import jakarta.servlet.FilterChain;
 import jakarta.servlet.ServletException;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -47,15 +48,27 @@ public class SecurityConfig {
 
     private final JwtAuthenticationFilter jwtAuthenticationFilter;
     private final List<String> allowedOrigins;
+    private final String cookieSameSite;
+    private final boolean cookieSecure;
 
+    @Autowired
     public SecurityConfig(
             JwtAuthenticationFilter jwtAuthenticationFilter,
-            @Value("${hogarya.security.cors.allowed-origins:http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,https://hogarya.cl,https://www.hogarya.cl}") String allowedOriginsStr) {
+            @Value("${hogarya.security.cors.allowed-origins:http://localhost:3000,http://localhost:5173,http://127.0.0.1:3000,https://hogarya.cl,https://www.hogarya.cl}") String allowedOriginsStr,
+            @Value("${hogarya.security.cookie.same-site:Strict}") String cookieSameSite,
+            @Value("${hogarya.security.cookie.secure:true}") boolean cookieSecure
+    ) {
         this.jwtAuthenticationFilter = jwtAuthenticationFilter;
         this.allowedOrigins = Arrays.stream(allowedOriginsStr.split(","))
                 .map(String::trim)
                 .filter(s -> !s.isEmpty())
                 .toList();
+        this.cookieSameSite = cookieSameSite;
+        this.cookieSecure = "None".equalsIgnoreCase(cookieSameSite) || cookieSecure;
+    }
+
+    public SecurityConfig(JwtAuthenticationFilter jwtAuthenticationFilter, String allowedOriginsStr) {
+        this(jwtAuthenticationFilter, allowedOriginsStr, "Strict", true);
     }
 
     @Bean
@@ -63,9 +76,16 @@ public class SecurityConfig {
         CsrfTokenRequestAttributeHandler requestHandler = new CsrfTokenRequestAttributeHandler();
         requestHandler.setCsrfRequestAttributeName(null);
 
+        CookieCsrfTokenRepository csrfRepository = CookieCsrfTokenRepository.withHttpOnlyFalse();
+        csrfRepository.setCookieCustomizer(customizer -> customizer
+                .sameSite(cookieSameSite)
+                .secure(cookieSecure)
+                .path("/")
+        );
+
         http
             .csrf(csrf -> csrf
-                .csrfTokenRepository(CookieCsrfTokenRepository.withHttpOnlyFalse())
+                .csrfTokenRepository(csrfRepository)
                 .csrfTokenRequestHandler(requestHandler)
                 .ignoringRequestMatchers(
                     // Endpoints públicos o sin sesión previa exentos de CSRF
@@ -99,9 +119,11 @@ public class SecurityConfig {
                 .requestMatchers(HttpMethod.GET, "/api/v1/auth/csrf").permitAll()
                 // Swagger OpenAPI
                 .requestMatchers("/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html").permitAll()
-                // Actuator y salud básica
-                .requestMatchers("/actuator/health", "/actuator/info").permitAll()
-                // Cualquier otra solicitud (ej. GET /api/v1/auth/me, POST /api/v1/propiedades, POST/DELETE /api/v1/favoritos, /actuator/metrics/**) requiere autenticación
+                // Actuator y salud básica pública
+                .requestMatchers(HttpMethod.GET, "/actuator/health", "/actuator/info").permitAll()
+                // Métricas operacionales protegidas: acceso exclusivo para ROLE_ADMIN
+                .requestMatchers("/actuator/metrics/**").hasRole("ADMIN")
+                // Cualquier otra solicitud (ej. GET /api/v1/auth/me, POST /api/v1/propiedades, POST/DELETE /api/v1/favoritos) requiere autenticación
                 .anyRequest().authenticated()
             )
             .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class)

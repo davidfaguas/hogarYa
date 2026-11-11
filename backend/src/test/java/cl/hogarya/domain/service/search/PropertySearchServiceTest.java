@@ -90,4 +90,78 @@ class PropertySearchServiceTest {
         assertNotNull(capturedVector, "El mapper debe recibir el vector calculado automáticamente");
         assertEquals(768, capturedVector.length);
     }
+
+    @Test
+    @DisplayName("Caché LRU: Reutiliza embedding en consultas repetidas y registra métricas")
+    void shouldUseLruCacheForQueryEmbeddings() {
+        PropertySearchMapper mockMapper = mock(PropertySearchMapper.class);
+        JdbcClient mockJdbcClient = mock(JdbcClient.class, RETURNS_DEEP_STUBS);
+        EmbeddingProvider spyProvider = spy(new FakeEmbeddingProvider());
+        io.micrometer.core.instrument.simple.SimpleMeterRegistry meterRegistry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+
+        when(mockJdbcClient.sql(anyString()).update()).thenReturn(1);
+        when(mockMapper.searchHybrid(any(), any(), anyInt(), anyInt(), anyInt()))
+                .thenReturn(Collections.emptyList());
+
+        PropertySearchService service = new PropertySearchService(
+                mockMapper, mockJdbcClient, spyProvider, null, meterRegistry, 300L
+        );
+
+        PropertySearchCriteria criteria = new PropertySearchCriteria(
+                "VENTA", "DEPARTAMENTO", null, null, null, null, null, null, null, null, null,
+                "departamento en providencia", "relevancia"
+        );
+
+        // 1ª búsqueda -> Cache Miss
+        service.search(criteria, 10, 0);
+        // 2ª búsqueda idéntica -> Cache Hit
+        service.search(criteria, 10, 0);
+
+        // El proveedor sólo debió ser invocado 1 vez
+        verify(spyProvider, times(1)).generateEmbedding("departamento en providencia");
+
+        var metrics = service.getEmbeddingMetrics();
+        assertEquals(1, metrics.cacheMissCount());
+        assertEquals(1, metrics.cacheHitCount());
+        assertEquals(1.0, meterRegistry.get("hogarya.search.embedding.cache.hit").counter().count());
+        assertEquals(1.0, meterRegistry.get("hogarya.search.embedding.cache.miss").counter().count());
+    }
+
+    @Test
+    @DisplayName("Timeout y Fallback: Retorna null y hace fallback a texto si el proveedor excede el timeout")
+    void shouldFallbackToTextOnlyOnTimeout() {
+        PropertySearchMapper mockMapper = mock(PropertySearchMapper.class);
+        JdbcClient mockJdbcClient = mock(JdbcClient.class, RETURNS_DEEP_STUBS);
+        EmbeddingProvider slowProvider = mock(EmbeddingProvider.class);
+        io.micrometer.core.instrument.simple.SimpleMeterRegistry meterRegistry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+
+        when(mockJdbcClient.sql(anyString()).update()).thenReturn(1);
+        when(slowProvider.generateEmbedding(anyString())).thenAnswer(invocation -> {
+            Thread.sleep(150); // Simula demora superior al timeout configurado (50 ms)
+            return new float[768];
+        });
+
+        // Configurar timeout corto de 50 ms
+        PropertySearchService service = new PropertySearchService(
+                mockMapper, mockJdbcClient, slowProvider, null, meterRegistry, 50L
+        );
+
+        PropertySearchCriteria criteria = new PropertySearchCriteria(
+                "VENTA", "CASA", null, null, null, null, null, null, null, null, null,
+                "casa con retraso extremo en modelo", "relevancia"
+        );
+
+        service.search(criteria, 10, 0);
+
+        // Mapper debe haber recibido null (fallback a solo texto)
+        ArgumentCaptor<float[]> vectorCaptor = ArgumentCaptor.forClass(float[].class);
+        verify(mockMapper).searchHybrid(eq(criteria), vectorCaptor.capture(), eq(200), eq(10), eq(0));
+        assertNull(vectorCaptor.getValue(), "Al expirar el timeout, el vector debe ser null para fallback a texto");
+
+        var metrics = service.getEmbeddingMetrics();
+        assertEquals(1, metrics.timeoutCount());
+        assertEquals(1, metrics.fallbackTextCount());
+        assertEquals(1.0, meterRegistry.get("hogarya.search.embedding.timeout").counter().count());
+        assertEquals(1.0, meterRegistry.get("hogarya.search.embedding.fallback.text").counter().count());
+    }
 }

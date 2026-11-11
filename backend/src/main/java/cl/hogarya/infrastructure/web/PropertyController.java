@@ -14,6 +14,7 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.jdbc.core.simple.JdbcClient;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
 import java.math.BigDecimal;
@@ -178,21 +179,59 @@ public class PropertyController {
             @ApiResponse(responseCode = "201", description = "Propiedad publicada exitosamente",
                     content = @Content(schema = @Schema(implementation = PublishPropertyResponse.class))),
             @ApiResponse(responseCode = "400", description = "Datos de publicación inválidos"),
-            @ApiResponse(responseCode = "403", description = "No autenticado o token CSRF ausente")
+            @ApiResponse(responseCode = "403", description = "No autenticado, rol insuficiente o token CSRF ausente")
     })
     public ResponseEntity<PublishPropertyResponse> publishNew(
-            @RequestBody PublishPropertyRequest req
+            @RequestBody PublishPropertyRequest req,
+            Authentication authentication
     ) {
+        if (authentication == null || !authentication.isAuthenticated()) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
+
+        boolean isAdmin = authentication.getAuthorities().stream()
+                .anyMatch(a -> "ROLE_ADMIN".equals(a.getAuthority()));
+        boolean isPublisherRole = authentication.getAuthorities().stream()
+                .anyMatch(a -> "ROLE_ADMIN".equals(a.getAuthority())
+                        || "ROLE_CORREDOR".equals(a.getAuthority())
+                        || "ROLE_INMOBILIARIA".equals(a.getAuthority()));
+
+        if (!isPublisherRole) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
+
         if (req == null || req.titulo() == null || req.titulo().isBlank()
                 || req.precioUf() == null || req.comunaId() == null) {
             return ResponseEntity.badRequest().build();
         }
 
+        String username = authentication.getName();
+        Map<String, Object> userRow = jdbcClient.sql("""
+                SELECT id, rol, organizacion_id 
+                FROM usuario 
+                WHERE LOWER(email) = LOWER(:email) AND activo = TRUE
+                """)
+                .param("email", username)
+                .query(new org.springframework.jdbc.core.ColumnMapRowMapper())
+                .optional()
+                .orElse(null);
+
+        UUID orgId;
+        if (isAdmin) {
+            orgId = req.organizacionId() != null
+                    ? req.organizacionId()
+                    : (userRow != null && userRow.get("organizacion_id") != null
+                    ? (UUID) userRow.get("organizacion_id")
+                    : UUID.fromString("00000000-0000-0000-0000-000000000001"));
+        } else {
+            if (userRow == null || userRow.get("organizacion_id") == null) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+            }
+            orgId = (UUID) userRow.get("organizacion_id");
+        }
+
         UUID id = UUID.randomUUID();
         String codigo = "PROP-" + id.toString().substring(0, 8).toUpperCase();
-        UUID orgId = req.organizacionId() != null
-                ? req.organizacionId()
-                : UUID.fromString("00000000-0000-0000-0000-000000000001");
 
         double lat = req.latitud() != null ? req.latitud() : -33.4250;
         double lon = req.longitud() != null ? req.longitud() : -70.6100;
@@ -234,7 +273,7 @@ public class PropertyController {
                 .param("ds1", Boolean.TRUE.equals(req.subsidioDs1()))
                 .update();
 
-        // Disparo asíncrono con reintentos
+        // Disparo asíncrono con reintentos en ThreadPoolTaskExecutor acotado
         propertyIndexingService.indexPropertyAsync(id);
 
         return ResponseEntity.status(HttpStatus.CREATED)
@@ -242,14 +281,65 @@ public class PropertyController {
     }
 
     @PostMapping("/{id}/publicar")
-    @Operation(summary = "Publicar propiedad existente", description = "Activa una propiedad y dispara su indexación semántica asíncrona")
+    @Operation(summary = "Publicar propiedad existente", description = "Activa una propiedad y dispara su indexación semántica asíncrona tras verificar rol y pertenencia de organización")
     @ApiResponses({
             @ApiResponse(responseCode = "200", description = "Propiedad activada e indexación iniciada"),
+            @ApiResponse(responseCode = "403", description = "Rol insuficiente o el usuario no pertenece a la organización dueña del recurso"),
             @ApiResponse(responseCode = "404", description = "Propiedad no encontrada")
     })
     public ResponseEntity<PublishPropertyResponse> publishExisting(
-            @Parameter(description = "Identificador único de la propiedad") @PathVariable UUID id
+            @Parameter(description = "Identificador único de la propiedad") @PathVariable UUID id,
+            Authentication authentication
     ) {
+        if (authentication == null || !authentication.isAuthenticated()) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED).build();
+        }
+
+        boolean isAdmin = authentication.getAuthorities().stream()
+                .anyMatch(a -> "ROLE_ADMIN".equals(a.getAuthority()));
+        boolean isPublisherRole = authentication.getAuthorities().stream()
+                .anyMatch(a -> "ROLE_ADMIN".equals(a.getAuthority())
+                        || "ROLE_CORREDOR".equals(a.getAuthority())
+                        || "ROLE_INMOBILIARIA".equals(a.getAuthority()));
+
+        if (!isPublisherRole) {
+            return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+        }
+
+        Map<String, Object> propRow = jdbcClient.sql("""
+                SELECT organizacion_id 
+                FROM propiedad 
+                WHERE id = :id
+                """)
+                .param("id", id)
+                .query(new org.springframework.jdbc.core.ColumnMapRowMapper())
+                .optional()
+                .orElse(null);
+
+        if (propRow == null) {
+            return ResponseEntity.notFound().build();
+        }
+
+        UUID propOrgId = (UUID) propRow.get("organizacion_id");
+
+        if (!isAdmin) {
+            String username = authentication.getName();
+            Map<String, Object> userRow = jdbcClient.sql("""
+                    SELECT organizacion_id 
+                    FROM usuario 
+                    WHERE LOWER(email) = LOWER(:email) AND activo = TRUE
+                    """)
+                    .param("email", username)
+                    .query(new org.springframework.jdbc.core.ColumnMapRowMapper())
+                    .optional()
+                    .orElse(null);
+
+            UUID userOrgId = userRow != null ? (UUID) userRow.get("organizacion_id") : null;
+            if (userOrgId == null || !userOrgId.equals(propOrgId)) {
+                return ResponseEntity.status(HttpStatus.FORBIDDEN).build();
+            }
+        }
+
         int updated = jdbcClient.sql("""
                 UPDATE propiedad
                 SET activo = TRUE, publicada_el = NOW(), actualizada_el = NOW()

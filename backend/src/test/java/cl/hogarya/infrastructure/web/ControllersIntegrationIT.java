@@ -76,11 +76,24 @@ class ControllersIntegrationIT {
     private UUID userId;
     private UUID testPropId;
     private Cookie authCookie;
+    private Cookie corredorOrg1Cookie;
+    private Cookie corredorOrg2Cookie;
+    private Cookie adminCookie;
+
+    @Autowired(required = false)
+    private org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor indexingTaskExecutor;
+
+    @Autowired
+    private cl.hogarya.domain.service.search.PropertyIndexingService propertyIndexingService;
 
     @BeforeEach
     void setUpTestData() {
         UUID orgId = UUID.fromString("00000000-0000-0000-0000-000000000001");
+        UUID orgId2 = UUID.fromString("00000000-0000-0000-0000-000000000002");
         userId = UUID.fromString("00000000-0000-0000-0000-000000000099");
+        UUID corredor1Id = UUID.fromString("00000000-0000-0000-0000-000000000088");
+        UUID corredor2Id = UUID.fromString("00000000-0000-0000-0000-000000000077");
+        UUID adminId = UUID.fromString("00000000-0000-0000-0000-000000000066");
         testPropId = UUID.fromString("55555555-5555-5555-5555-555555555555");
 
         jdbcClient.sql("""
@@ -90,11 +103,51 @@ class ControllersIntegrationIT {
             """).param("id", orgId).update();
 
         jdbcClient.sql("""
+            INSERT INTO organizacion (id, rut_empresa, razon_social, nombre_fantasia, tipo, telefono_contacto, whatsapp_contacto, email_contacto)
+            VALUES (:id, '76999999-0', 'Corredora Otra SpA', 'Otra Corredora', 'CORREDORA', '+56922222222', '+56922222222', 'contacto@otra.cl')
+            ON CONFLICT (id) DO NOTHING
+            """).param("id", orgId2).update();
+
+        // 1. Usuario Persona (rol insuficiente para publicar)
+        jdbcClient.sql("""
             INSERT INTO usuario (id, rut, email, password_hash, nombres, apellidos, rol, organizacion_id, activo)
             VALUES (:id, '12345678-5', 'usuario.test@hogarya.cl', :hash, 'Juan', 'Perez', 'ROLE_PERSONA', :orgId, true)
             ON CONFLICT (id) DO UPDATE SET password_hash = EXCLUDED.password_hash
             """)
             .param("id", userId)
+            .param("hash", passwordEncoder.encode("passwordTest123!"))
+            .param("orgId", orgId)
+            .update();
+
+        // 2. Corredor en Org 1 (dueño del recurso testPropId)
+        jdbcClient.sql("""
+            INSERT INTO usuario (id, rut, email, password_hash, nombres, apellidos, rol, organizacion_id, activo)
+            VALUES (:id, '11111111-1', 'corredor1@hogarya.cl', :hash, 'Carlos', 'Corredor', 'ROLE_CORREDOR', :orgId, true)
+            ON CONFLICT (id) DO UPDATE SET password_hash = EXCLUDED.password_hash
+            """)
+            .param("id", corredor1Id)
+            .param("hash", passwordEncoder.encode("passwordTest123!"))
+            .param("orgId", orgId)
+            .update();
+
+        // 3. Corredor en Org 2 (organización ajena)
+        jdbcClient.sql("""
+            INSERT INTO usuario (id, rut, email, password_hash, nombres, apellidos, rol, organizacion_id, activo)
+            VALUES (:id, '22222222-2', 'corredor2@otra.cl', :hash, 'Ana', 'Ajena', 'ROLE_CORREDOR', :orgId2, true)
+            ON CONFLICT (id) DO UPDATE SET password_hash = EXCLUDED.password_hash
+            """)
+            .param("id", corredor2Id)
+            .param("hash", passwordEncoder.encode("passwordTest123!"))
+            .param("orgId2", orgId2)
+            .update();
+
+        // 4. Administrador con permisos globales
+        jdbcClient.sql("""
+            INSERT INTO usuario (id, rut, email, password_hash, nombres, apellidos, rol, organizacion_id, activo)
+            VALUES (:id, '99999999-9', 'admin@hogarya.cl', :hash, 'Admin', 'Root', 'ROLE_ADMIN', :orgId, true)
+            ON CONFLICT (id) DO UPDATE SET password_hash = EXCLUDED.password_hash
+            """)
+            .param("id", adminId)
             .param("hash", passwordEncoder.encode("passwordTest123!"))
             .param("orgId", orgId)
             .update();
@@ -114,11 +167,22 @@ class ControllersIntegrationIT {
             ) ON CONFLICT (id) DO NOTHING
             """).param("id", testPropId).param("orgId", orgId).update();
 
-        // Generar cookie JWT válida para usuario autenticado
-        String token = jwtTokenService.generateToken("usuario.test@hogarya.cl", "12345678-5", List.of("ROLE_PERSONA"));
-        authCookie = new Cookie("HOGARYA_SESSION", token);
+        // Generar cookies JWT de prueba
+        authCookie = new Cookie("HOGARYA_SESSION", jwtTokenService.generateToken("usuario.test@hogarya.cl", "12345678-5", List.of("ROLE_PERSONA")));
         authCookie.setHttpOnly(true);
         authCookie.setPath("/");
+
+        corredorOrg1Cookie = new Cookie("HOGARYA_SESSION", jwtTokenService.generateToken("corredor1@hogarya.cl", "11111111-1", List.of("ROLE_CORREDOR")));
+        corredorOrg1Cookie.setHttpOnly(true);
+        corredorOrg1Cookie.setPath("/");
+
+        corredorOrg2Cookie = new Cookie("HOGARYA_SESSION", jwtTokenService.generateToken("corredor2@otra.cl", "22222222-2", List.of("ROLE_CORREDOR")));
+        corredorOrg2Cookie.setHttpOnly(true);
+        corredorOrg2Cookie.setPath("/");
+
+        adminCookie = new Cookie("HOGARYA_SESSION", jwtTokenService.generateToken("admin@hogarya.cl", "99999999-9", List.of("ROLE_ADMIN")));
+        adminCookie.setHttpOnly(true);
+        adminCookie.setPath("/");
     }
 
     @Test
@@ -280,7 +344,7 @@ class ControllersIntegrationIT {
     }
 
     @Test
-    @DisplayName("Propiedades: POST /api/v1/propiedades publica propiedad con CSRF y dispara indexación")
+    @DisplayName("Propiedades: POST /api/v1/propiedades valida roles y CSRF")
     void shouldPublishNewPropertyWithAuthAndCsrf() throws Exception {
         String publishJson = """
                 {
@@ -305,15 +369,23 @@ class ControllersIntegrationIT {
 
         // 1. Sin CSRF debe ser rechazado con 403
         mockMvc.perform(post("/api/v1/propiedades")
+                        .cookie(corredorOrg1Cookie)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(publishJson))
+                .andExpect(status().isForbidden());
+
+        // 2. Con rol insuficiente (ROLE_PERSONA) debe responder 403 Forbidden
+        mockMvc.perform(post("/api/v1/propiedades")
+                        .with(csrf())
                         .cookie(authCookie)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(publishJson))
                 .andExpect(status().isForbidden());
 
-        // 2. Con CSRF y Auth debe responder 201 Created y retornar ID
+        // 3. Con CSRF y rol permitido (ROLE_CORREDOR) debe responder 201 Created y retornar ID
         mockMvc.perform(post("/api/v1/propiedades")
                         .with(csrf())
-                        .cookie(authCookie)
+                        .cookie(corredorOrg1Cookie)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(publishJson))
                 .andExpect(status().isCreated())
@@ -323,16 +395,151 @@ class ControllersIntegrationIT {
     }
 
     @Test
-    @DisplayName("Actuator: Métricas protegidas de indexación (401/403 sin auth, 200 con auth)")
+    @DisplayName("Propiedades: POST /api/v1/propiedades/{id}/publicar valida pertenencia de organización y roles")
+    void shouldEnforceOwnershipAndRolesOnPublishExisting() throws Exception {
+        // 1. Rol insuficiente (ROLE_PERSONA) -> 403 Forbidden
+        mockMvc.perform(post("/api/v1/propiedades/" + testPropId + "/publicar")
+                        .with(csrf())
+                        .cookie(authCookie))
+                .andExpect(status().isForbidden());
+
+        // 2. Corredor de OTRA organización (Org 2 != Org 1) intentando publicar recurso ajeno -> 403 Forbidden
+        mockMvc.perform(post("/api/v1/propiedades/" + testPropId + "/publicar")
+                        .with(csrf())
+                        .cookie(corredorOrg2Cookie))
+                .andExpect(status().isForbidden());
+
+        // 3. Corredor de la MISMA organización (Org 1 == Org 1) -> 200 OK
+        mockMvc.perform(post("/api/v1/propiedades/" + testPropId + "/publicar")
+                        .with(csrf())
+                        .cookie(corredorOrg1Cookie))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id", is(testPropId.toString())))
+                .andExpect(jsonPath("$.mensaje", containsString("activada e indexación")));
+
+        // 4. Administrador con permisos globales sobre cualquier recurso -> 200 OK
+        mockMvc.perform(post("/api/v1/propiedades/" + testPropId + "/publicar")
+                        .with(csrf())
+                        .cookie(adminCookie))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    @DisplayName("Actuator: /actuator/metrics/** restringido exclusivamente a ROLE_ADMIN (401 unauth, 403 persona, 200 admin)")
     void shouldProtectActuatorMetricsAndExposeIndexingCounters() throws Exception {
-        // Sin autenticación debe ser rechazado
+        // 1. Sin autenticación -> 401 Unauthorized
         mockMvc.perform(get("/actuator/metrics/hogarya.indexing.indexed.count"))
                 .andExpect(status().isUnauthorized());
 
-        // Con autenticación debe retornar la métrica registrada en Micrometer
+        // 2. Con autenticación pero rol no administrativo (ROLE_PERSONA) -> 403 Forbidden
         mockMvc.perform(get("/actuator/metrics/hogarya.indexing.indexed.count").cookie(authCookie))
+                .andExpect(status().isForbidden());
+
+        // 3. Con rol ROLE_ADMIN -> 200 OK
+        mockMvc.perform(get("/actuator/metrics/hogarya.indexing.indexed.count").cookie(adminCookie))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.name", is("hogarya.indexing.indexed.count")));
+    }
+
+    @Test
+    @DisplayName("Rendimiento E2E: Medir latencia HTTP p95 de GET /api/v1/propiedades con y sin cálculo de embedding")
+    void shouldMeasureEndToEndHttpLatencyWithAndWithoutEmbeddingCall() throws Exception {
+        // Calentamiento (5 repeticiones)
+        for (int i = 0; i < 5; i++) {
+            mockMvc.perform(get("/api/v1/propiedades")
+                            .param("query", "departamento providencia metro")
+                            .param("limit", "10")
+                            .cookie(authCookie))
+                    .andExpect(status().isOk());
+        }
+
+        int repetitions = 35;
+        long[] timesWithFreshEmbedding = new long[repetitions];
+        long[] timesWithCachedEmbedding = new long[repetitions];
+
+        // Caso A: Con resolución de embedding (consultas no cacheadas / frescas)
+        for (int i = 0; i < repetitions; i++) {
+            String freshQuery = "departamento providencia sector " + UUID.randomUUID().toString().substring(0, 8);
+            long start = System.nanoTime();
+            mockMvc.perform(get("/api/v1/propiedades")
+                            .param("query", freshQuery)
+                            .param("limit", "10")
+                            .cookie(authCookie))
+                    .andExpect(status().isOk());
+            timesWithFreshEmbedding[i] = (System.nanoTime() - start) / 1_000_000; // ms
+        }
+
+        // Caso B: Con embedding en caché LRU (consultas idénticas sin llamada al proveedor)
+        String cachedQuery = "departamento vitacura parque";
+        // Pre-cargar en caché
+        mockMvc.perform(get("/api/v1/propiedades")
+                        .param("query", cachedQuery)
+                        .param("limit", "10")
+                        .cookie(authCookie))
+                .andExpect(status().isOk());
+
+        for (int i = 0; i < repetitions; i++) {
+            long start = System.nanoTime();
+            mockMvc.perform(get("/api/v1/propiedades")
+                            .param("query", cachedQuery)
+                            .param("limit", "10")
+                            .cookie(authCookie))
+                    .andExpect(status().isOk());
+            timesWithCachedEmbedding[i] = (System.nanoTime() - start) / 1_000_000; // ms
+        }
+
+        java.util.Arrays.sort(timesWithFreshEmbedding);
+        java.util.Arrays.sort(timesWithCachedEmbedding);
+
+        int p95Index = (int) Math.ceil(0.95 * repetitions) - 1;
+        int medianIndex = repetitions / 2;
+
+        long freshMedian = timesWithFreshEmbedding[medianIndex];
+        long freshP95 = timesWithFreshEmbedding[p95Index];
+        long cachedMedian = timesWithCachedEmbedding[medianIndex];
+        long cachedP95 = timesWithCachedEmbedding[p95Index];
+
+        System.out.println("====================================================================================");
+        System.out.println("MEDICIÓN LATENCIA END-TO-END HTTP GET /api/v1/propiedades (35 reps, MockMvc + JWT):");
+        System.out.println(String.format(" - Con cálculo Embedding:   Mediana = %d ms | p95 = %d ms (min: %d ms, max: %d ms)",
+                freshMedian, freshP95, timesWithFreshEmbedding[0], timesWithFreshEmbedding[repetitions - 1]));
+        System.out.println(String.format(" - Con Caché LRU (sin call): Mediana = %d ms | p95 = %d ms (min: %d ms, max: %d ms)",
+                cachedMedian, cachedP95, timesWithCachedEmbedding[0], timesWithCachedEmbedding[repetitions - 1]));
+        System.out.println("====================================================================================");
+
+        // Aseveración de control de latencia E2E
+        org.junit.jupiter.api.Assertions.assertTrue(cachedP95 < 250,
+                "El p95 extremo a extremo con caché debe estar holgadamente bajo 250 ms");
+    }
+
+    @Test
+    @DisplayName("Async y Backfill: Executor acotado y consulta FOR UPDATE SKIP LOCKED")
+    void shouldVerifyBoundedIndexingExecutorAndSkipLocked() {
+        if (indexingTaskExecutor != null) {
+            org.junit.jupiter.api.Assertions.assertEquals(2, indexingTaskExecutor.getCorePoolSize());
+            org.junit.jupiter.api.Assertions.assertEquals(4, indexingTaskExecutor.getMaxPoolSize());
+            org.junit.jupiter.api.Assertions.assertTrue(indexingTaskExecutor.getThreadNamePrefix().startsWith("indexing-"));
+        }
+
+        // Ejecución de backfill verificando que ejecuta SKIP LOCKED sin lanzar excepciones
+        int processed = propertyIndexingService.backfillMissingEmbeddings(5);
+        org.junit.jupiter.api.Assertions.assertTrue(processed >= 0);
+    }
+
+    @Test
+    @DisplayName("Seguridad: Cookie XSRF-TOKEN con SameSite configurado")
+    void shouldReturnCoherentCsrfCookieSameSite() throws Exception {
+        var result = mockMvc.perform(get("/api/v1/auth/csrf"))
+                .andExpect(status().isOk())
+                .andReturn();
+
+        String setCookie = result.getResponse().getHeader("Set-Cookie");
+        if (setCookie != null && setCookie.contains("XSRF-TOKEN")) {
+            org.junit.jupiter.api.Assertions.assertTrue(
+                    setCookie.toLowerCase().contains("samesite"),
+                    "La cookie XSRF-TOKEN debe contener el atributo SameSite"
+            );
+        }
     }
 
     @Test

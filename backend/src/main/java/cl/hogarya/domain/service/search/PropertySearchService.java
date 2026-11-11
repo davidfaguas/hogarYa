@@ -3,33 +3,102 @@ package cl.hogarya.domain.service.search;
 import cl.hogarya.domain.model.search.PropertySearchCriteria;
 import cl.hogarya.domain.model.search.PropertySearchResultDto;
 import cl.hogarya.infrastructure.persistence.mapper.PropertySearchMapper;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.env.Environment;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Servicio de Búsqueda Híbrida Geodésica y Semántica.
- * Corrección HNSW:
+ * Corrección HNSW y Resiliencia de Consultas:
+ * - Caché LRU en memoria acotada (1.000 entradas) para embeddings de texto de consulta.
+ * - Timeout estricto (300 ms) en la llamada a EmbeddingProvider con fallback transparente a FTS textual.
+ * - Registro de métricas Micrometer (hit, miss, timeout, fallback).
  * - Configura SET LOCAL hnsw.ef_search = 200 dentro de @Transactional para garantizar
  *   que pgvector retorne hasta 200 candidatos del Top-K vectorial.
  * - Activa SET LOCAL hnsw.iterative_scan = relaxed_order y SET LOCAL hnsw.max_scan_tuples = 50000
  *   únicamente si la extensión pgvector instalada es versión >= 0.8.0.
- * - Integra EmbeddingProvider para vectorizar automáticamente consultas en lenguaje natural
- *   sin requerir que la capa superior pase un float[] manualmente.
  * - Falla obligatoria al iniciar en producción si no existe una implementación real de EmbeddingProvider.
  */
 @Service
 public class PropertySearchService {
 
+    private static final Logger log = LoggerFactory.getLogger(PropertySearchService.class);
+
     private final PropertySearchMapper propertySearchMapper;
     private final JdbcClient jdbcClient;
     private final EmbeddingProvider embeddingProvider;
     private volatile Boolean supportsIterativeScan = null;
+
+    private final QueryEmbeddingLruCache queryEmbeddingCache;
+    private final long embeddingTimeoutMs;
+    private final ExecutorService embeddingExecutor;
+
+    private final AtomicLong cacheHitCount = new AtomicLong(0);
+    private final AtomicLong cacheMissCount = new AtomicLong(0);
+    private final AtomicLong timeoutCount = new AtomicLong(0);
+    private final AtomicLong fallbackTextCount = new AtomicLong(0);
+
+    private Counter cacheHitCounter;
+    private Counter cacheMissCounter;
+    private Counter timeoutCounter;
+    private Counter fallbackTextCounter;
+
+    public record EmbeddingMetrics(
+            long cacheHitCount,
+            long cacheMissCount,
+            long timeoutCount,
+            long fallbackTextCount
+    ) {}
+
+    public static class QueryEmbeddingLruCache {
+        private final int maxEntries;
+        private final Map<String, float[]> cache;
+
+        public QueryEmbeddingLruCache(int maxEntries) {
+            this.maxEntries = maxEntries;
+            this.cache = Collections.synchronizedMap(
+                    new LinkedHashMap<>(maxEntries, 0.75f, true) {
+                        @Override
+                        protected boolean removeEldestEntry(Map.Entry<String, float[]> eldest) {
+                            return size() > QueryEmbeddingLruCache.this.maxEntries;
+                        }
+                    }
+            );
+        }
+
+        public float[] get(String key) {
+            return cache.get(key);
+        }
+
+        public void put(String key, float[] vector) {
+            if (key != null && vector != null) {
+                cache.put(key, vector);
+            }
+        }
+
+        public int size() {
+            return cache.size();
+        }
+
+        public void clear() {
+            cache.clear();
+        }
+    }
 
     @Autowired
     public PropertySearchService(
@@ -40,6 +109,13 @@ public class PropertySearchService {
     ) {
         this.propertySearchMapper = propertySearchMapper;
         this.jdbcClient = jdbcClient;
+        this.embeddingTimeoutMs = 2000L;
+        this.queryEmbeddingCache = new QueryEmbeddingLruCache(1000);
+        this.embeddingExecutor = Executors.newCachedThreadPool(r -> {
+            Thread t = new Thread(r, "query-embedding-timeout-worker");
+            t.setDaemon(true);
+            return t;
+        });
 
         if (embeddingProvider == null) {
             boolean isProd = false;
@@ -67,13 +143,97 @@ public class PropertySearchService {
     public PropertySearchService(
             PropertySearchMapper propertySearchMapper,
             JdbcClient jdbcClient,
+            EmbeddingProvider embeddingProvider,
+            Environment environment,
+            MeterRegistry meterRegistry,
+            long embeddingTimeoutMs
+    ) {
+        this.propertySearchMapper = propertySearchMapper;
+        this.jdbcClient = jdbcClient;
+        this.embeddingTimeoutMs = embeddingTimeoutMs > 0 ? embeddingTimeoutMs : 2000L;
+        this.queryEmbeddingCache = new QueryEmbeddingLruCache(1000);
+        this.embeddingExecutor = Executors.newCachedThreadPool(r -> {
+            Thread t = new Thread(r, "query-embedding-timeout-worker");
+            t.setDaemon(true);
+            return t;
+        });
+        this.embeddingProvider = embeddingProvider != null ? embeddingProvider : new FakeEmbeddingProvider();
+        if (meterRegistry != null) {
+            setMeterRegistry(meterRegistry);
+        }
+    }
+
+    @Autowired(required = false)
+    public void setMeterRegistry(MeterRegistry meterRegistry) {
+        if (meterRegistry != null) {
+            this.cacheHitCounter = Counter.builder("hogarya.search.embedding.cache.hit")
+                    .description("Aciertos de caché LRU para embeddings de consulta")
+                    .register(meterRegistry);
+            this.cacheMissCounter = Counter.builder("hogarya.search.embedding.cache.miss")
+                    .description("Fallos de caché LRU para embeddings de consulta")
+                    .register(meterRegistry);
+            this.timeoutCounter = Counter.builder("hogarya.search.embedding.timeout")
+                    .description("Timeouts excedidos al resolver embeddings de consulta")
+                    .register(meterRegistry);
+            this.fallbackTextCounter = Counter.builder("hogarya.search.embedding.fallback.text")
+                    .description("Ocasiones en que se ejecutó fallback exclusivo a búsqueda por texto")
+                    .register(meterRegistry);
+        }
+    }
+
+    public PropertySearchService(
+            PropertySearchMapper propertySearchMapper,
+            JdbcClient jdbcClient,
             EmbeddingProvider embeddingProvider
     ) {
-        this(propertySearchMapper, jdbcClient, embeddingProvider, null);
+        this(propertySearchMapper, jdbcClient, embeddingProvider, null, null, 2000L);
     }
 
     public PropertySearchService(PropertySearchMapper propertySearchMapper, JdbcClient jdbcClient) {
-        this(propertySearchMapper, jdbcClient, new FakeEmbeddingProvider(), null);
+        this(propertySearchMapper, jdbcClient, new FakeEmbeddingProvider(), null, null, 2000L);
+    }
+
+    /**
+     * Resuelve el embedding de una consulta de texto libre aplicando caché LRU y timeout con retorno seguro.
+     */
+    public float[] resolveEmbeddingVector(String rawQuery) {
+        if (rawQuery == null || rawQuery.isBlank()) {
+            return null;
+        }
+
+        String cacheKey = rawQuery.trim().toLowerCase();
+        float[] cached = queryEmbeddingCache.get(cacheKey);
+        if (cached != null) {
+            recordCacheHit();
+            return cached;
+        }
+
+        recordCacheMiss();
+        if (embeddingProvider == null) {
+            recordFallbackText();
+            return null;
+        }
+
+        Future<float[]> future = embeddingExecutor.submit(() -> embeddingProvider.generateEmbedding(rawQuery));
+        try {
+            float[] vector = future.get(embeddingTimeoutMs, TimeUnit.MILLISECONDS);
+            if (vector != null) {
+                queryEmbeddingCache.put(cacheKey, vector);
+            }
+            return vector;
+        } catch (TimeoutException te) {
+            future.cancel(true);
+            recordTimeout();
+            recordFallbackText();
+            log.warn("Timeout ({} ms) al generar embedding para consulta '{}'. Retorno a búsqueda exclusiva por texto.",
+                    embeddingTimeoutMs, rawQuery);
+            return null;
+        } catch (Exception ex) {
+            recordFallbackText();
+            log.warn("Error generando embedding para consulta '{}': {}. Fallback a búsqueda solo texto.",
+                    rawQuery, ex.getMessage());
+            return null;
+        }
     }
 
     /**
@@ -85,11 +245,7 @@ public class PropertySearchService {
             int limit,
             int offset
     ) {
-        float[] vector = null;
-        if (criteria != null && criteria.rawQuery() != null && !criteria.rawQuery().isBlank()) {
-            vector = embeddingProvider.generateEmbedding(criteria.rawQuery());
-        }
-        return search(criteria, vector, limit, offset);
+        return search(criteria, (float[]) null, limit, offset);
     }
 
     @Transactional(readOnly = true)
@@ -99,13 +255,54 @@ public class PropertySearchService {
             int limit,
             int offset
     ) {
-        // Si no se proporcionó vector explícito pero hay texto libre en los criterios, generarlo automáticamente
+        // Si no se proporcionó vector explícito pero hay texto libre en los criterios, generarlo con caché y timeout
         if (embeddingVector == null && criteria != null && criteria.rawQuery() != null && !criteria.rawQuery().isBlank()) {
-            embeddingVector = embeddingProvider.generateEmbedding(criteria.rawQuery());
+            embeddingVector = resolveEmbeddingVector(criteria.rawQuery());
         }
 
         configureVectorSession();
         return propertySearchMapper.searchHybrid(criteria, embeddingVector, 200, limit, offset);
+    }
+
+    public EmbeddingMetrics getEmbeddingMetrics() {
+        return new EmbeddingMetrics(
+                cacheHitCount.get(),
+                cacheMissCount.get(),
+                timeoutCount.get(),
+                fallbackTextCount.get()
+        );
+    }
+
+    public QueryEmbeddingLruCache getQueryEmbeddingCache() {
+        return queryEmbeddingCache;
+    }
+
+    private void recordCacheHit() {
+        cacheHitCount.incrementAndGet();
+        if (cacheHitCounter != null) {
+            cacheHitCounter.increment();
+        }
+    }
+
+    private void recordCacheMiss() {
+        cacheMissCount.incrementAndGet();
+        if (cacheMissCounter != null) {
+            cacheMissCounter.increment();
+        }
+    }
+
+    private void recordTimeout() {
+        timeoutCount.incrementAndGet();
+        if (timeoutCounter != null) {
+            timeoutCounter.increment();
+        }
+    }
+
+    private void recordFallbackText() {
+        fallbackTextCount.incrementAndGet();
+        if (fallbackTextCounter != null) {
+            fallbackTextCounter.increment();
+        }
     }
 
     @Transactional(readOnly = true)

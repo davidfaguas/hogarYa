@@ -163,8 +163,9 @@ public class PropertyIndexingService {
 
     /**
      * Indexación asíncrona con reintentos exponenciales para el flujo de publicación.
+     * Ejecuta sobre el ThreadPoolTaskExecutor acotado 'indexingTaskExecutor' sin autoinvocación interna.
      */
-    @Async
+    @Async("indexingTaskExecutor")
     public CompletableFuture<Boolean> indexPropertyAsync(UUID propertyId) {
         int maxRetries = 3;
         long backoffMs = 500;
@@ -199,10 +200,13 @@ public class PropertyIndexingService {
 
     /**
      * Job de relleno (backfill) para propiedades existentes que aún no poseen embedding semántico.
+     * Utiliza FOR UPDATE SKIP LOCKED dentro de transacción para permitir ejecución concurrente segura
+     * entre múltiples réplicas o instancias del backend sin contención de bloqueos ni duplicación de trabajo.
      *
      * @param batchSize Número máximo de propiedades a procesar en esta tanda
      * @return Número de propiedades indexadas con éxito
      */
+    @Transactional
     public int backfillMissingEmbeddings(int batchSize) {
         if (embeddingProvider == null) {
             log.warn("Backfill abortado: EmbeddingProvider no disponible");
@@ -216,6 +220,7 @@ public class PropertyIndexingService {
                 WHERE embedding IS NULL AND activo = TRUE 
                 ORDER BY publicada_el ASC 
                 LIMIT :limit
+                FOR UPDATE SKIP LOCKED
                 """)
                 .param("limit", limit)
                 .query((rs, rowNum) -> (UUID) rs.getObject("id"))
