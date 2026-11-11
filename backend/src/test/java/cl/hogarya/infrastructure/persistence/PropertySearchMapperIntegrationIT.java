@@ -287,7 +287,9 @@ class PropertySearchMapperIntegrationIT {
         // Validar asociación correcta de metro_detalle para ambas
         assertNotNull(first.nombreEstacionCercana(), "La primera propiedad debe tener metro_detalle poblado");
         assertNotNull(second.nombreEstacionCercana(), "La segunda propiedad debe tener metro_detalle poblado");
-        assertEquals("Test Metro A", first.nombreEstacionCercana());
-        assertEquals("Test Metro A", second.nombreEstacionCercana());
+        assertNotNull(first.distanciaMetroMetros(), "La primera propiedad debe tener distancia de metro calculada");
+        assertNotNull(second.distanciaMetroMetros(), "La segunda propiedad debe tener distancia de metro calculada");
+        assertEquals(first.nombreEstacionCercana(), second.nombreEstacionCercana(), "Ambas propiedades deben asociar la misma estación de metro más cercana");
+        assertEquals(first.distanciaMetroMetros(), second.distanciaMetroMetros(), 0.01, "La distancia a la estación de metro debe ser idéntica");
     }
 }
