@@ -116,7 +116,7 @@ public class PropertyController {
                 WHERE p.id = :id AND p.activo = TRUE
                 """)
                 .param("id", id)
-                .query(Map.class)
+                .query(new org.springframework.jdbc.core.ColumnMapRowMapper())
                 .optional()
                 .map(map -> ResponseEntity.ok((Map<String, Object>) map))
                 .orElseGet(() -> ResponseEntity.notFound().build());
