@@ -50,7 +50,7 @@ public class SecurityConfig {
                 .requestMatchers(HttpMethod.GET, "/api/v1/propiedades/**").permitAll()
                 .requestMatchers(HttpMethod.POST, "/api/v1/propiedades/busqueda").permitAll()
                 .requestMatchers(HttpMethod.GET, "/api/v1/finanzas/uf/**").permitAll()
-                .requestMatchers(HttpMethod.POST, "/api/v1/finanzas/simular-credito", "/api/v1/simulador").permitAll()
+                .requestMatchers(HttpMethod.POST, "/api/v1/simulador").permitAll()
                 .requestMatchers(HttpMethod.POST, "/api/v1/subsidios/evaluar").permitAll()
                 .requestMatchers(HttpMethod.POST, "/api/v1/leads").permitAll()
                 // Auth endpoints públicos

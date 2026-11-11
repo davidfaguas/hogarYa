@@ -292,4 +292,84 @@ class PropertySearchMapperIntegrationIT {
         assertEquals(first.nombreEstacionCercana(), second.nombreEstacionCercana(), "Ambas propiedades deben asociar la misma estación de metro más cercana");
         assertEquals(first.distanciaMetroMetros(), second.distanciaMetroMetros(), 0.01, "La distancia a la estación de metro debe ser idéntica");
     }
+
+    @Test
+    @DisplayName("HNSW relaxed_order: Reordenamiento estricto por distancia antes de asignar rangos RRF")
+    void shouldStrictlyReorderCandidatesByDistanceBeforeAssigningRrfRank() {
+        // Generar 3 vectores distintos con distancias crecientes respecto al vector de consulta
+        float[] queryVec = embeddingProvider.generateEmbedding("consulta de prueba para ordenamiento estricto");
+        float[] closeVec = embeddingProvider.generateEmbedding("consulta de prueba para ordenamiento estricto"); // dist = 0.0
+        float[] mediumVec = embeddingProvider.generateEmbedding("texto moderadamente diferente con variacion");
+        float[] farVec = embeddingProvider.generateEmbedding("completamente opuesto y alejado sin relacion tematica alguna");
+
+        jdbcClient.sql("""
+            INSERT INTO propiedad (
+                id, codigo_publicacion, organizacion_id, titulo, descripcion, tipo_propiedad, 
+                operacion, estado, precio_uf, m2_util, m2_total, dormitorios, banos, 
+                comuna_id, direccion_referencial, barrio, ubicacion, activo, embedding
+            ) VALUES (
+                '77777777-7777-7777-7777-777777777771'::uuid, 'DIST-CLOSE', :orgId,
+                'Propiedad identica en vector', 'Descripcion cercana',
+                'DEPARTAMENTO', 'VENTA', 'NUEVA', 3000.00, 50.0, 60.0, 1, 1, 
+                1, 'Av. Cercana 1', 'Barrio', 
+                ST_SetSRID(ST_MakePoint(-70.5986, -33.5222), 4326)::geography, TRUE,
+                ('[' || :vec || ']')::vector
+            )
+            """).param("orgId", orgId).param("vec", formatVector(closeVec)).update();
+
+        jdbcClient.sql("""
+            INSERT INTO propiedad (
+                id, codigo_publicacion, organizacion_id, titulo, descripcion, tipo_propiedad, 
+                operacion, estado, precio_uf, m2_util, m2_total, dormitorios, banos, 
+                comuna_id, direccion_referencial, barrio, ubicacion, activo, embedding
+            ) VALUES (
+                '77777777-7777-7777-7777-777777777772'::uuid, 'DIST-MEDIUM', :orgId,
+                'Propiedad a distancia media', 'Descripcion media',
+                'DEPARTAMENTO', 'VENTA', 'NUEVA', 3000.00, 50.0, 60.0, 1, 1, 
+                1, 'Av. Media 2', 'Barrio', 
+                ST_SetSRID(ST_MakePoint(-70.5986, -33.5222), 4326)::geography, TRUE,
+                ('[' || :vec || ']')::vector
+            )
+            """).param("orgId", orgId).param("vec", formatVector(mediumVec)).update();
+
+        jdbcClient.sql("""
+            INSERT INTO propiedad (
+                id, codigo_publicacion, organizacion_id, titulo, descripcion, tipo_propiedad, 
+                operacion, estado, precio_uf, m2_util, m2_total, dormitorios, banos, 
+                comuna_id, direccion_referencial, barrio, ubicacion, activo, embedding
+            ) VALUES (
+                '77777777-7777-7777-7777-777777777773'::uuid, 'DIST-FAR', :orgId,
+                'Propiedad a distancia lejana', 'Descripcion lejana',
+                'DEPARTAMENTO', 'VENTA', 'NUEVA', 3000.00, 50.0, 60.0, 1, 1, 
+                1, 'Av. Lejana 3', 'Barrio', 
+                ST_SetSRID(ST_MakePoint(-70.5986, -33.5222), 4326)::geography, TRUE,
+                ('[' || :vec || ']')::vector
+            )
+            """).param("orgId", orgId).param("vec", formatVector(farVec)).update();
+
+        PropertySearchCriteria criteria = new PropertySearchCriteria(
+                "VENTA", "DEPARTAMENTO", (short) 1, null, null, null, null, null, null,
+                null, null, null, "relevancia"
+        );
+
+        List<PropertySearchResultDto> results = propertySearchService.search(criteria, queryVec, 10, 0);
+        assertTrue(results.size() >= 3, "Deben retornar al menos las 3 propiedades insertadas");
+
+        // Encontrar las posiciones de las 3 propiedades
+        int idxClose = -1, idxMedium = -1, idxFar = -1;
+        for (int i = 0; i < results.size(); i++) {
+            String code = results.get(i).codigoPublicacion();
+            if ("DIST-CLOSE".equals(code)) idxClose = i;
+            else if ("DIST-MEDIUM".equals(code)) idxMedium = i;
+            else if ("DIST-FAR".equals(code)) idxFar = i;
+        }
+
+        assertTrue(idxClose != -1 && idxMedium != -1 && idxFar != -1, "Las 3 propiedades deben estar en el resultado");
+        assertTrue(idxClose < idxMedium, "DIST-CLOSE (menor distancia) debe rankear antes que DIST-MEDIUM");
+        assertTrue(idxMedium < idxFar, "DIST-MEDIUM debe rankear antes que DIST-FAR");
+        assertTrue(results.get(idxClose).rrfScore() > results.get(idxMedium).rrfScore(),
+                "DIST-CLOSE debe tener mayor RRF score que DIST-MEDIUM");
+        assertTrue(results.get(idxMedium).rrfScore() > results.get(idxFar).rrfScore(),
+                "DIST-MEDIUM debe tener mayor RRF score que DIST-FAR");
+    }
 }

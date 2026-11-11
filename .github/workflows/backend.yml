@@ -55,12 +55,13 @@ jobs:
             -p 5432:5432 hogarya-bench-db
           docker exec pg-bench sh -c 'until psql -U hogarya_app -d hogarya_db -c "SELECT 1" >/dev/null 2>&1; do sleep 1; done'
 
-      - name: Apply Flyway Migrations (V1, V2_1, V2_2, V2_3)
+      - name: Apply Flyway Migrations (V1, V2_1, V2_2, V2_3, V2_4)
         run: |
           docker exec -i pg-bench psql -U hogarya_app -d hogarya_db < backend/src/main/resources/db/migration/V1__initial_schema.sql
           docker exec -i pg-bench psql -U hogarya_app -d hogarya_db < backend/src/main/resources/db/migration/V2_1__seed_territorio_metro.sql
           docker exec -i pg-bench psql -U hogarya_app -d hogarya_db < backend/src/main/resources/db/migration/V2_2__seed_uf_cmf.sql
           docker exec -i pg-bench psql -U hogarya_app -d hogarya_db < backend/src/main/resources/db/migration/V2_3__seed_pendiente_verificar.sql
+          docker exec -i pg-bench psql -U hogarya_app -d hogarya_db < backend/src/main/resources/db/migration/V2_4__create_favorito_table.sql
 
       - name: Run 100k Volume Benchmark & HNSW Fidelity Analysis
         run: |

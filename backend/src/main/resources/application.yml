@@ -16,6 +16,10 @@ mybatis:
   type-handlers-package: cl.hogarya.infrastructure.persistence.handler
 
 hogarya:
+  gemini:
+    api-key: ${GEMINI_API_KEY:}
+    model: ${HOGARYA_GEMINI_MODEL:models/gemini-embedding-001}
+    base-url: ${HOGARYA_GEMINI_BASE_URL:https://generativelanguage.googleapis.com/v1beta}
   security:
     jwt:
       secret: ${HOGARYA_JWT_SECRET}
@@ -38,6 +42,10 @@ spring:
     password: ${SPRING_DATASOURCE_PASSWORD:hogarya_secret}
 
 hogarya:
+  gemini:
+    api-key: ${GEMINI_API_KEY:}
+    model: ${HOGARYA_GEMINI_MODEL:models/gemini-embedding-001}
+    base-url: ${HOGARYA_GEMINI_BASE_URL:https://generativelanguage.googleapis.com/v1beta}
   security:
     jwt:
       secret: ${HOGARYA_JWT_SECRET:ClaveSecretaHogarYaChileSuperSegura2026DeAlMenos256BitsLongitudMinima}
@@ -55,6 +63,10 @@ spring:
     password: ${SPRING_DATASOURCE_PASSWORD:hogarya_secret}
 
 hogarya:
+  gemini:
+    api-key: ${GEMINI_API_KEY:}
+    model: ${HOGARYA_GEMINI_MODEL:models/gemini-embedding-001}
+    base-url: ${HOGARYA_GEMINI_BASE_URL:https://generativelanguage.googleapis.com/v1beta}
   security:
     jwt:
       secret: ${HOGARYA_JWT_SECRET:ClaveSecretaHogarYaChileSuperSegura2026DeAlMenos256BitsLongitudMinima}

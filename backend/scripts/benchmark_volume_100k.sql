@@ -349,6 +349,167 @@ SELECT plan_integro FROM analisis_punto_5000 WHERE escenario = 'Original (Sin Mi
 \echo '===================================================================================================='
 SELECT plan_integro FROM analisis_punto_5000 WHERE escenario LIKE 'Mitigado%';
 
+CREATE TEMP TABLE IF NOT EXISTS barrido_hibrido_completo (
+    punto text,
+    filas_filtro int,
+    latencia_ms numeric,
+    plan_integro text
+);
+TRUNCATE barrido_hibrido_completo;
+
+DO $$
+DECLARE
+    v_qvec text;
+    v_sql text;
+    v_line text;
+    v_cur_plan text;
+    v_cur_time numeric;
+    v_match text[];
+    v_filter text;
+    v_punto_label text;
+    v_total_filas int;
+    k int;
+BEGIN
+    SELECT (base_vec + noise_vec)::text INTO v_qvec
+    FROM vector_base_pool bp, vector_noise_pool np
+    WHERE bp.pool_id = 0 AND np.noise_id = 0;
+
+    FOR k IN 1..4 LOOP
+        IF k = 1 THEN
+            v_punto_label := '500 filas (~0.5%)';
+            v_filter := 'p.activo = true AND p.operacion = ''VENTA'' AND p.tipo_propiedad = ''DEPARTAMENTO'' AND p.comuna_id = 1 AND p.dormitorios = 1 AND p.precio_uf BETWEEN 3000 AND 3656';
+        ELSIF k = 2 THEN
+            v_punto_label := '5.000 filas (~5.0%)';
+            v_filter := 'p.activo = true AND p.operacion = ''VENTA'' AND p.tipo_propiedad IN (''DEPARTAMENTO'', ''CASA'') AND p.comuna_id IN (1, 2, 3) AND p.precio_uf <= 4196';
+        ELSIF k = 3 THEN
+            v_punto_label := '20.000 filas (~20.0%)';
+            v_filter := 'p.activo = true AND p.operacion = ''VENTA'' AND p.tipo_propiedad IN (''DEPARTAMENTO'', ''CASA'') AND p.precio_uf <= 6400';
+        ELSE
+            v_punto_label := '50.000 filas (~50.0%)';
+            v_filter := 'p.activo = true AND p.operacion = ''VENTA''';
+        END IF;
+
+        EXECUTE 'SELECT count(*) FROM propiedad p WHERE ' || v_filter INTO v_total_filas;
+
+        v_sql := $q$
+        WITH uf_actual AS (
+            SELECT valor AS uf_hoy 
+            FROM valor_uf 
+            WHERE fecha <= CURRENT_DATE 
+            ORDER BY fecha DESC 
+            LIMIT 1
+        ),
+        top_vec_candidates AS (
+            SELECT p.id, (p.embedding <=> '$q$ || v_qvec || $q$'::vector(768)) AS dist
+            FROM propiedad p
+            WHERE $q$ || v_filter || $q$
+            ORDER BY p.embedding <=> '$q$ || v_qvec || $q$'::vector(768)
+            LIMIT 200
+        ),
+        top_vec AS (
+            SELECT c.id, DENSE_RANK() OVER (ORDER BY c.dist ASC) AS r_vec
+            FROM top_vec_candidates c
+        ),
+        top_fts AS (
+            SELECT p.id, DENSE_RANK() OVER (ORDER BY ts_rank_cd(p.search_vector, websearch_to_tsquery('spanish', 'piscina metro')) DESC) as r_fts
+            FROM propiedad p
+            WHERE $q$ || v_filter || $q$
+              AND p.search_vector @@ websearch_to_tsquery('spanish', 'piscina metro')
+            ORDER BY ts_rank_cd(p.search_vector, websearch_to_tsquery('spanish', 'piscina metro')) DESC
+            LIMIT 200
+        ),
+        rrf_unificado AS (
+            SELECT
+                COALESCE(f.id, v.id) AS id,
+                (COALESCE(1.0 / (60.0 + f.r_fts), 0.0) + COALESCE(1.0 / (60.0 + v.r_vec), 0.0)) AS rrf_score
+            FROM top_fts f
+            FULL OUTER JOIN top_vec v ON f.id = v.id
+        ),
+        metro_detalle AS (
+            SELECT DISTINCT ON (p.id)
+                p.id AS propiedad_id,
+                em.nombre AS nombre_estacion,
+                ROUND(ST_Distance(p.ubicacion, em.ubicacion)::numeric, 1)::float8 AS distancia_metros
+            FROM (
+                SELECT u.id 
+                FROM rrf_unificado u
+                JOIN propiedad p ON p.id = u.id
+                ORDER BY u.rrf_score DESC, p.precio_uf ASC
+                LIMIT 20 OFFSET 0
+            ) u
+            JOIN propiedad p ON p.id = u.id
+            JOIN estacion_metro em ON ST_DWithin(p.ubicacion, em.ubicacion, 1000)
+            WHERE em.activo = TRUE
+            ORDER BY p.id, ST_Distance(p.ubicacion, em.ubicacion) ASC, em.id ASC
+        )
+        SELECT 
+            p.id,
+            p.codigo_publicacion,
+            p.titulo,
+            p.operacion,
+            p.tipo_propiedad,
+            p.precio_uf,
+            ROUND(p.precio_uf * COALESCE(uf.uf_hoy, 37850), 0) AS precio_clp_estimado,
+            c.nombre AS comuna_nombre,
+            md.distancia_metros AS distancia_metro_metros,
+            md.nombre_estacion AS nombre_estacion_cercana,
+            u.rrf_score
+        FROM rrf_unificado u
+        JOIN propiedad p ON p.id = u.id
+        JOIN comuna c ON c.id = p.comuna_id
+        LEFT JOIN uf_actual uf ON TRUE
+        LEFT JOIN metro_detalle md ON md.propiedad_id = p.id
+        ORDER BY u.rrf_score DESC, p.precio_uf ASC
+        LIMIT 20 OFFSET 0
+        $q$;
+
+        v_cur_plan := '';
+        v_cur_time := 0.0;
+        FOR v_line IN EXECUTE 'EXPLAIN (ANALYZE, BUFFERS) ' || v_sql LOOP
+            v_cur_plan := v_cur_plan || v_line || E'\n';
+            IF v_line ~* 'Execution Time:' THEN
+                v_match := regexp_matches(v_line, 'Execution Time:\s+([0-9.]+)');
+                IF v_match IS NOT NULL AND array_length(v_match, 1) >= 1 THEN
+                    v_cur_time := v_match[1]::numeric;
+                END IF;
+            END IF;
+        END LOOP;
+
+        INSERT INTO barrido_hibrido_completo (punto, filas_filtro, latencia_ms, plan_integro)
+        VALUES (v_punto_label, v_total_filas, v_cur_time, v_cur_plan);
+    END LOOP;
+END $$;
+
+\echo '===================================================================================================='
+\echo 'MEDICIÓN DE LA CONSULTA HÍBRIDA COMPLETA (500, 5.000, 20.000 y 50.000 FILAS)'
+\echo 'TEXTO + VECTOR + RRF CON REORDENAMIENTO MONOTÓNICO + METRO POSTGIS'
+\echo '===================================================================================================='
+SELECT 
+    punto,
+    filas_filtro,
+    latencia_ms || ' ms' AS latencia
+FROM barrido_hibrido_completo;
+
+\echo '===================================================================================================='
+\echo 'PLAN DE LA CONSULTA HÍBRIDA COMPLETA - 500 FILAS'
+\echo '===================================================================================================='
+SELECT plan_integro FROM barrido_hibrido_completo WHERE punto LIKE '500 filas%';
+
+\echo '===================================================================================================='
+\echo 'PLAN DE LA CONSULTA HÍBRIDA COMPLETA - 5.000 FILAS'
+\echo '===================================================================================================='
+SELECT plan_integro FROM barrido_hibrido_completo WHERE punto LIKE '5.000 filas%';
+
+\echo '===================================================================================================='
+\echo 'PLAN DE LA CONSULTA HÍBRIDA COMPLETA - 20.000 FILAS'
+\echo '===================================================================================================='
+SELECT plan_integro FROM barrido_hibrido_completo WHERE punto LIKE '20.000 filas%';
+
+\echo '===================================================================================================='
+\echo 'PLAN DE LA CONSULTA HÍBRIDA COMPLETA - 50.000 FILAS'
+\echo '===================================================================================================='
+SELECT plan_integro FROM barrido_hibrido_completo WHERE punto LIKE '50.000 filas%';
+
 -- ====================================================================================================
 -- 5. BENCHMARK DE LATENCIA RECONCILIADA: 35 REPETICIONES DE LA CONSULTA HÍBRIDA COMPLETA
 --    MEDIANA Y P95 CALCULADAS DIRECTAMENTE DESDE LOS EXPLAIN (MISMA FUENTE DE DATOS)
@@ -387,8 +548,8 @@ BEGIN
         ORDER BY fecha DESC 
         LIMIT 1
     ),
-    top_vec AS (
-        SELECT p.id, DENSE_RANK() OVER (ORDER BY p.embedding <=> '$q$ || v_qvec || $q$'::vector(768)) as r_vec
+    top_vec_candidates AS (
+        SELECT p.id, (p.embedding <=> '$q$ || v_qvec || $q$'::vector(768)) AS dist
         FROM propiedad p
         WHERE p.activo = true
           AND p.operacion = 'VENTA'
@@ -398,6 +559,10 @@ BEGIN
           AND p.precio_uf BETWEEN 3000 AND 3070
         ORDER BY p.embedding <=> '$q$ || v_qvec || $q$'::vector(768)
         LIMIT 200
+    ),
+    top_vec AS (
+        SELECT c.id, DENSE_RANK() OVER (ORDER BY c.dist ASC) AS r_vec
+        FROM top_vec_candidates c
     ),
     top_fts AS (
         SELECT p.id, DENSE_RANK() OVER (ORDER BY ts_rank_cd(p.search_vector, websearch_to_tsquery('spanish', 'piscina metro')) DESC) as r_fts

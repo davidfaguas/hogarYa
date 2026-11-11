@@ -128,20 +128,32 @@
                 </otherwise>
             </choose>
         ),
-        <!-- Defecto 4: Top-K directo sobre la tabla usando índice HNSW de pgvector -->
-        top_vec AS (
+        <!-- Defecto 4 y Reordenamiento HNSW: Selección de Top-K con reordenamiento estricto por distancia antes de ranking RRF -->
+        top_vec_candidates AS (
             <choose>
                 <when test="embeddingVector != null">
                     SELECT 
                         p.id,
-                        DENSE_RANK() OVER (
-                            ORDER BY p.embedding &lt;=&gt; #{embeddingVector, jdbcType=OTHER, typeHandler=cl.hogarya.infrastructure.persistence.handler.PgVectorTypeHandler} ASC
-                        ) AS r_vec
+                        (p.embedding &lt;=&gt; #{embeddingVector, jdbcType=OTHER, typeHandler=cl.hogarya.infrastructure.persistence.handler.PgVectorTypeHandler}) AS dist
                     FROM propiedad p
                     WHERE <include refid="hardFilters"/>
                       AND p.embedding IS NOT NULL
                     ORDER BY p.embedding &lt;=&gt; #{embeddingVector, jdbcType=OTHER, typeHandler=cl.hogarya.infrastructure.persistence.handler.PgVectorTypeHandler} ASC
                     LIMIT #{topK}
+                </when>
+                <otherwise>
+                    SELECT p.id, 0.0::float8 AS dist
+                    FROM top_fts p
+                </otherwise>
+            </choose>
+        ),
+        top_vec AS (
+            <choose>
+                <when test="embeddingVector != null">
+                    SELECT 
+                        c.id,
+                        DENSE_RANK() OVER (ORDER BY c.dist ASC) AS r_vec
+                    FROM top_vec_candidates c
                 </when>
                 <otherwise>
                     SELECT p.id, 1::bigint AS r_vec

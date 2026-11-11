@@ -51,7 +51,7 @@ public class MortgageSimulatorController {
             boolean tieneSubsidioDs19
     ) {}
 
-    @PostMapping({"/simulador", "/finanzas/simular-credito"})
+    @PostMapping("/simulador")
     @Operation(
             summary = "Simular crédito hipotecario",
             description = "Calcula el dividendo mensual en UF y CLP, gastos operacionales detallados, ingreso familiar requerido y elegibilidad de garantía FOGAES"
